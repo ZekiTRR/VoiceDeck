@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VoiceDeck</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- custom title bar -->
+<div id="titlebar">
+  <span class="tb-drag" id="tbDrag"><span class="tb-dot"></span>VoiceDeck</span>
+  <div class="tb-btns">
+    <button id="tbMin" aria-label="Свернуть"><svg viewBox="0 0 12 12"><path d="M2 9h8"/></svg></button>
+    <button id="tbMax" aria-label="Развернуть"><svg viewBox="0 0 12 12"><rect x="2.5" y="2.5" width="7" height="7"/></svg></button>
+    <button id="tbClose" class="close" aria-label="Закрыть"><svg viewBox="0 0 12 12"><path d="M3 3l6 6M9 3l-6 6"/></svg></button>
+  </div>
+</div>
+
+<div id="app">
+
+  <!-- sidebar -->
+  <aside id="side">
+    <div class="brand"><span class="brand-name">Voice<b>Deck</b></span></div>
+    <nav id="nav">
+      <button class="nav-item active" data-tab="voice">
+        <svg viewBox="0 0 24 24"><path d="M12 4a3 3 0 0 1 3 3v4a3 3 0 0 1-6 0V7a3 3 0 0 1 3-3Z"/><path d="M6 11a6 6 0 0 0 12 0"/><path d="M12 17v3"/></svg>
+        <span>Голос</span></button>
+      <button class="nav-item" data-tab="sounds">
+        <svg viewBox="0 0 24 24"><path d="M5 15V9h3l4-4v14l-4-4H5Z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/></svg>
+        <span>Звуки</span></button>
+      <button class="nav-item" data-tab="ai">
+        <svg viewBox="0 0 24 24"><rect x="5" y="7" width="14" height="10" rx="2"/><path d="M9 11v2M15 11v2M9.5 21h5"/></svg>
+        <span>AI-голос</span></button>
+      <button class="nav-item" data-tab="settings">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>
+        <span>Устройства</span></button>
+    </nav>
+    <div class="side-foot">
+      <div class="switch-row"><span>Голос</span><button id="powerBtn" class="switch" aria-label="Голос вкл/выкл"></button></div>
+      <div class="switch-row"><span>AI</span><button id="aiPowerBtn" class="switch" aria-label="AI вкл/выкл"></button></div>
+      <div class="switch-row" title="Слышать свой голос с эффектами на оригинальном выходе">
+        <span>Предпросмотр</span><button id="monitorBtn" class="switch" aria-label="Предпрослушивание голоса"></button></div>
+    </div>
+  </aside>
+
+  <!-- main column -->
+  <div id="main">
+    <header id="top">
+      <h1 id="paneTitle">Голосовые эффекты</h1>
+      <div class="top-live" id="topLive"></div>
+    </header>
+
+    <main id="content">
+
+      <!-- VOICE -->
+      <section id="tab-voice" class="pane active">
+        <div class="pane-tools">
+          <label class="tool">Питч <input type="range" id="pitchOv" min="-24" max="24" step="1" value="0"><output id="pitchOvVal" class="mono">off</output></label>
+          <label class="tool">Форманта <input type="range" id="formantOv" min="-24" max="24" step="1" value="0"><output id="formantOvVal" class="mono">off</output></label>
+          <button class="btn" id="ovReset">сброс</button>
+          <span class="spacer"></span>
+          <button class="btn primary" id="addPresetBtn">+ Персонаж</button>
+        </div>
+
+        <div class="voice-layout">
+          <div>
+            <div id="presetGrid" class="tile-grid"></div>
+            <!-- Voice EQ (applies to active character) -->
+            <div class="panel eq-panel">
+              <h3 class="panel-title">Эквалайзер персонажа</h3>
+              <div class="eq-sliders" id="voiceEq"></div>
+            </div>
+          </div>
+
+          <!-- Preset editor panel (right side) -->
+          <div id="presetEditor" class="panel preset-editor hidden">
+            <div class="editor-head">
+              <h3 class="panel-title">Редактор персонажа</h3>
+              <button class="btn" id="peClose" aria-label="Закрыть">✕</button>
+            </div>
+            <div class="row"><span>Имя</span><input type="text" id="peName" maxlength="30"></div>
+            <div class="row"><span>Питч</span><input type="range" id="pePitch" min="-24" max="24" step="1" value="0"><output class="mono" id="pePitchVal">0</output></div>
+            <div class="row"><span>Форманта</span><input type="range" id="peFormant" min="-24" max="24" step="1" value="0"><output class="mono" id="peFormantVal">0</output></div>
+            <div class="row"><span>Тембр</span><input type="range" id="peTimbre" min="-1" max="1" step="0.1" value="0"><output class="mono" id="peTimbreVal">0.0</output></div>
+            <div class="row"><span>Сила</span><input type="range" id="peStrength" min="0" max="1" step="0.05" value="1"><output class="mono" id="peStrengthVal">1.00</output></div>
+            <div class="row"><span>Пространство</span>
+              <select id="peSpace"><option value="none">нет</option><option value="room">комната</option><option value="hall">зал</option><option value="cave">пещера</option><option value="helmet">шлем</option><option value="radio">радио</option><option value="megaphone">мегафон</option></select></div>
+            <div class="row"><span>Эффект</span>
+              <select id="peEffect"><option value="none">нет</option><option value="robot">робот</option><option value="alien">пришелец</option><option value="atari">atari</option><option value="clone">клон</option><option value="silence">тишина</option></select></div>
+            <div class="chain-section">
+              <span class="panel-title">Цепочка эффектов</span>
+              <div id="peChainList" class="chain-list"></div>
+              <div class="chain-add">
+                <select id="peChainSel">
+                  <option value="">— выбери эффект —</option>
+                  <option value="room">комната</option><option value="hall">зал</option>
+                  <option value="cave">пещера</option><option value="helmet">шлем</option>
+                  <option value="radio">радио</option><option value="megaphone">мегафон</option>
+                  <option value="robot">робот</option><option value="alien">пришелец</option>
+                  <option value="atari">atari</option><option value="clone">клон</option>
+                </select>
+                <button class="btn" id="peAddChain">+ в цепочку</button>
+              </div>
+            </div>
+            <div class="eq-section">
+              <span class="panel-title">Эквалайзер</span>
+              <div class="eq-sliders" id="peEq"></div>
+            </div>
+            <div class="form-actions">
+              <button class="btn primary" id="peSave">Сохранить как новый ★</button>
+              <div class="note">Ползунки меняют звук временно. «Сохранить» создаёт нового персонажа — встроенные пресеты остаются статическими.</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- SOUNDS -->
+      <section id="tab-sounds" class="pane">
+        <div class="pane-tools">
+          <div class="search-wrap">
+            <svg viewBox="0 0 24 24" class="search-icon"><circle cx="10" cy="10" r="6"/><path d="M15 15l5 5"/></svg>
+            <input type="text" id="soundSearch" placeholder="поиск..." class="search-input">
+          </div>
+          <span class="spacer"></span>
+          <button class="s-ctl on" id="viewGrid" aria-label="Карточки"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/></svg></button>
+          <button class="s-ctl" id="viewList" aria-label="Список"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+          <button class="btn" id="refreshSoundsBtn" title="Подхватить новые и удалённые файлы из папки без перезапуска">⟳ Обновить</button>
+          <button class="btn" id="stopPreviewBtn" title="Остановить предпрослушивание звуков">⏹ Предпросмотр</button>
+          <button class="btn" id="stopAllBtn">Стоп все</button>
+          <button class="btn primary" id="addSoundBtn">+ Добавить (несколько)</button>
+        </div>
+        <div class="note" style="margin:0 0 10px">
+          Перетащи аудиофайлы в окно — они сразу скопируются в <span class="mono">data\sounds</span>, можно сразу несколько. Файлы, добавленные в папку вручную, подхватываются кнопкой <b>⟳ Обновить</b> без перезапуска.
+        </div>
+        <div id="soundGrid" class="sound-grid"></div>
+        <div id="soundList" class="sound-list hidden"></div>
+        <div id="soundEmpty" class="empty hidden">
+          Библиотека пуста.<br><button class="btn primary" id="emptyAddBtn">Добавить звук</button>
+        </div>
+      </section>
+
+      <!-- AI -->
+      <section id="tab-ai" class="pane">
+        <div class="ai-layout">
+          <div>
+            <div id="aiVoiceList" class="voice-list"></div>
+            <div id="aiMissing" class="empty hidden">Модели не установлены.</div>
+            <div class="pane-tools" style="margin-top:14px">
+              <button class="btn primary" id="aiConvertPthBtn">Конвертировать .pth</button>
+              <button class="btn" id="aiImportBtn">Импорт голоса</button>
+              <button class="btn" id="aiModelsHelpBtn">Где взять голоса?</button>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="row"><span>Питч AI</span><input type="range" id="aiPitch" min="-24" max="24" step="1" value="0"><output class="mono" id="aiPitchVal">0</output></div>
+            <div class="row"><span>Провайдер</span>
+              <select id="aiProvider"><option value="auto">auto</option><option value="cuda">cuda</option><option value="dml">dml</option><option value="cpu">cpu</option></select></div>
+            <div class="row"><span>Запас</span><input type="range" id="aiMargin" min="0" max="500" step="10" value="100"><output class="mono" id="aiMarginVal">100 мс</output></div>
+            <div class="row"><span>Кроссфейд</span><input type="range" id="aiFade" min="5" max="300" step="5" value="30"><output class="mono" id="aiFadeVal">30 мс</output></div>
+            <div class="row"><span>Авто-лимит</span>
+              <label class="inline"><input type="checkbox" id="aiAutolimit" checked>
+              <select id="aiFlap"><option value="4">4</option><option value="8" selected>8</option><option value="16">16</option><option value="32">32</option></select></label></div>
+            <div class="stat-strip">
+              <div><i>устройство</i><b class="mono" id="aiDevice">—</b></div>
+              <div><i>латентность</i><b class="mono" id="aiLat">—</b></div>
+              <div><i>выпадения</i><b class="mono" id="aiUnd">—</b></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- SETTINGS -->
+      <section id="tab-settings" class="pane">
+        <div class="settings-grid">
+          <div class="panel">
+            <h3 class="panel-title">Маршрут</h3>
+            <div class="row"><span>Микрофон</span><select id="capSelect"></select></div>
+            <div class="row"><span>Выход (вирт. кабель)</span><select id="playSelect"></select></div>
+            <button class="btn primary" id="applyRoute">Применить</button>
+            <div class="note" id="routeNote"></div>
+          </div>
+          <div class="panel">
+            <h3 class="panel-title">Оригинальный выход</h3>
+            <div class="row"><span>Устройство</span><select id="origSelect"></select></div>
+            <div class="row"><span>Включить</span><input type="checkbox" id="monitorChk"></div>
+            <div class="row"><span>Голос вкл (bypass)</span><input type="checkbox" id="bypassChk" checked></div>
+            <div class="row"><span>Приглушать при речи</span><input type="checkbox" id="duckingChk"></div>
+          </div>
+          <div class="panel">
+            <h3 class="panel-title">Задержка</h3>
+            <div class="row"><span>Режим</span>
+              <select id="latencyMode">
+                <option value="0">Минимальная (~25 мс)</option>
+                <option value="1" selected>Нормальная (~50 мс)</option>
+                <option value="2">Высокое качество (~73 мс)</option>
+              </select></div>
+            <div class="note">Меньше = быстрее отклик, больше = стабильнее.</div>
+          </div>
+          <div class="panel">
+            <h3 class="panel-title">Хоткеи</h3>
+            <div class="row"><span>Хоткей: голос</span><button class="keycap wide" id="hkVoice">— клик —</button></div>
+            <div class="row"><span>Хоткей: AI</span><button class="keycap wide" id="hkAi">— клик —</button></div>
+            <div class="row"><span>Хоткей: стоп звуков</span><button class="keycap wide" id="hkStopAll">— клик —</button></div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- status bar -->
+    <footer id="status">
+      <div class="led" id="micLed"></div>
+      <span class="mono mic-num" id="micNum">−∞</span>
+      <span id="routeInfo">—</span>
+      <span class="spacer"></span>
+      <span class="mono" id="latInfo"></span>
+      <span class="mono" id="glitchInfo"></span>
+    </footer>
+  </div>
+</div>
+
+<!-- overlays -->
+<div id="hkOverlay" class="overlay hidden">
+  <div class="dialog"><h3>Нажми комбинацию…</h3>
+    <div class="combo mono" id="hkComboPreview">…</div>
+    <button class="btn" id="hkCancel">отмена</button></div>
+</div>
+
+<div id="confirmOverlay" class="overlay hidden">
+  <div class="dialog"><p id="confirmText">Удалить?</p>
+    <div class="dialog-actions center">
+      <button class="btn" id="confirmNo">Отмена</button>
+      <button class="btn danger" id="confirmYes">Удалить</button></div></div>
+</div>
+
+<div id="convertOverlay" class="overlay hidden">
+  <div class="dialog">
+    <h3>Конвертация RVC v2 (.pth)</h3>
+    <p class="dim mono" id="convertPath" style="font-size:11px;word-break:break-all"></p>
+    <div class="form-grid" style="text-align:left;margin:14px 0">
+      <label>Имя голоса<input type="text" id="cvName" maxlength="40"></label>
+      <label>Пол<select id="cvGender">
+        <option value="other">другой</option>
+        <option value="male">мужской</option>
+        <option value="female">женский</option>
+      </select></label>
+    </div>
+    <div class="row" style="border:none">
+      <span>Сдвиг питча</span>
+      <input type="range" id="cvPitch" min="-24" max="24" step="1" value="0">
+      <output class="mono" id="cvPitchVal">0</output>
+    </div>
+    <div class="dialog-actions center">
+      <button class="btn" id="cvCancel">Отмена</button>
+      <button class="btn primary" id="cvGo">Конвертировать</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="hidden"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

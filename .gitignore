@@ -1,0 +1,31 @@
+# Build output
+build/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.tlog/
+CMakeFiles/
+CMakeCache.txt
+
+# IDE / tooling
+.vs/
+.vscode/
+.opencode/
+*.user
+*.suo
+*.pyc
+__pycache__/
+
+# Portable user data — NEVER commit: sounds, presets, settings, AI models
+data/
+models/
+*.onnx
+*.pth
+*.part
+
+# Logs / scratch
+*.log
+uiout.txt
+uierr.txt
+dec_test.obj
