@@ -9,6 +9,9 @@
 ## Features
 
 - **Soundboard** — card/list views, waveform with seeking, volume, loop, hotkeys, preview to your speakers. Drag & drop adds a whole batch at once and copies files into `data\sounds`.
+- **Tags & search** — custom tags per clip, search by name or tag, tag filter chips. The built-in `hotkey` tag is added automatically whenever a sound gets a hotkey.
+- **Audio editor** — quick trim, global gain and per-region gain changes right in the app. Edits are non-destructive: the source file stays untouched, parameters live in `sounds.json`.
+- **Windows startup** — launch with Windows and an "always run as administrator" mode (UAC relaunch).
 - **45 voice characters** — pitch, formant, timbre, 8-band EQ, effect chains (radio → robot → cave), live editing with "Save as New".
 - **AI voice** — RVC v2 via ONNX Runtime (DirectML / CUDA / CPU), ~45–290 ms depending on model and GPU. Built-in `.pth` converter right from the UI.
 - **Devices** — mic and virtual cable selection, monitoring, latency mode, global hotkeys.
@@ -37,7 +40,7 @@ Or run `voicedeck.exe --cli` for the headless console mode with the same feature
 ```
 data\
   settings.json     devices, latency, AI tuning, hotkeys
-  sounds.json       sound library
+  sounds.json       sound library: tags, hotkeys and audio-editor settings (trimStart/trimEnd/gain/regions)
   characters.json   voice characters
   sounds\           clips (added files are copied here)
   AiVoice\          content_encoder.onnx, rmvpe.onnx, voices\*.onnx + *.json

@@ -907,7 +907,7 @@ void UiApp::handleMessage(const std::string& jsonText) {
         const std::string combo = j.value("combo", std::string());
         std::string err;
         if (target == "sound")
-            err = app_.hotkeys.bindSound(j.at("id").get<std::uint64_t>(), combo);
+            err = app_.bindSoundHotkey(j.at("id").get<std::uint64_t>(), combo);
         else if (target == "stopall")
             err = app_.hotkeys.bindStopAll(combo);
         else if (target == "preset")
@@ -925,11 +925,68 @@ void UiApp::handleMessage(const std::string& jsonText) {
     }
     if (cmd == "hotkeyOff") {
         const std::string target = j.value("target", std::string());
+        std::string err;
         if (target == "voice")
             app_.hotkeys.bindVoiceToggle("");
         else if (target == "ai")
             app_.hotkeys.bindAiToggle("");
+        else if (target == "sound")
+            err = app_.bindSoundHotkey(j.at("id").get<std::uint64_t>(), "");
         app_.saveAll();
+        if (!err.empty()) notify(err);
+        pushState();
+        return;
+    }
+
+    // --- tags ---------------------------------------------------------------
+    if (cmd == "setSoundTags") {
+        const std::string err = app_.setSoundTags(j.at("id").get<std::uint64_t>(), j.at("tags"));
+        if (!err.empty()) notify(err);
+        pushState();
+        return;
+    }
+    if (cmd == "addSoundTag") {
+        const std::string err = app_.addSoundTag(j.at("id").get<std::uint64_t>(),
+                                                 j.value("tag", std::string()));
+        if (!err.empty()) notify(err);
+        pushState();
+        return;
+    }
+    if (cmd == "removeSoundTag") {
+        const std::string err = app_.removeSoundTag(j.at("id").get<std::uint64_t>(),
+                                                    j.value("tag", std::string()));
+        if (!err.empty()) notify(err);
+        pushState();
+        return;
+    }
+
+    // --- in-app audio editor ------------------------------------------------
+    if (cmd == "editSound") {
+        const std::string err = app_.editSound(j.at("id").get<std::uint64_t>(), j);
+        if (!err.empty()) notify(err);
+        else notify("Звук отредактирован");
+        pushState();
+        return;
+    }
+
+    // --- Windows integration ------------------------------------------------
+    if (cmd == "autoStart") {
+        const std::string err = app_.setAutoStart(j.value("on", false));
+        if (!err.empty()) notify(err);
+        else notify(j.value("on", false) ? "Автозапуск включён" : "Автозапуск выключен");
+        pushState();
+        return;
+    }
+    if (cmd == "runAsAdmin") {
+        bool relaunching = false;
+        const std::string err = app_.setRunAsAdmin(j.value("on", false), relaunching);
+        if (relaunching) {
+            requestExit();
+            return;
+        }
+        if (!err.empty()) notify(err);
+        else notify(j.value("on", false) ? "Запуск от имени администратора включён"
+                                         : "Запуск от имени администратора выключен");
         pushState();
         return;
     }

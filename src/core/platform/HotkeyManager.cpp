@@ -292,6 +292,10 @@ std::string HotkeyManager::bindAiToggle(const std::string& combo) {
     return bindInternal(HotkeyAction{HotkeyAction::Kind::AiToggle, 0}, combo);
 }
 
+void HotkeyManager::unbindSound(std::uint64_t soundId) {
+    unbindInternal(HotkeyAction{HotkeyAction::Kind::Sound, soundId});
+}
+
 void HotkeyManager::unbindPreset(std::uint64_t presetIndex) {
     unbindInternal(HotkeyAction{HotkeyAction::Kind::Preset, presetIndex});
 }

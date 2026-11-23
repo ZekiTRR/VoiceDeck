@@ -1,5 +1,7 @@
 #include "app/App.hpp"
 
+#include "core/platform/AutoStart.hpp"
+#include "core/platform/Elevation.hpp"
 #include "core/util/Log.hpp"
 
 #include <algorithm>
@@ -258,6 +260,9 @@ void App::startHotkeyService() {
         const std::string berr =
             (id == 0) ? hotkeys.bindStopAll(combo) : hotkeys.bindSound(id, combo);
         if (!berr.empty()) log::warn("hotkey '%s' not restored: %s", combo.c_str(), berr.c_str());
+        // Older libraries (saved before tags existed) still get the built-in
+        // marker for every sound that actually has a hotkey.
+        if (id != 0 && berr.empty() && !combo.empty()) bank.addTag(id, kTagHotkey);
     }
     for (std::size_t i = 0; i < presets.size(); ++i) {
         if (presets[i].hotkey.empty()) continue;
@@ -384,6 +389,159 @@ void App::setSoundLoop(std::uint64_t id, bool on) {
     c.soundId = id;
     c.value = on ? 1.f : 0.f;
     engine.submit(c);
+}
+
+// ---------------------------------------------------------------- tags
+
+std::string App::setSoundTags(std::uint64_t id, const nlohmann::json& tags) {
+    std::vector<std::string> parsed;
+    if (tags.is_array()) {
+        for (const auto& t : tags)
+            if (t.is_string()) parsed.push_back(t.get<std::string>());
+    }
+    // The built-in tag cannot be faked by the tag editor: it is derived from
+    // the actual hotkey binding below.
+    const bool hasHotkey = bank.hasTag(id, kTagHotkey);
+    std::vector<std::string> user;
+    for (const std::string& t : parsed) {
+        if (toLower(t) == kTagHotkey) continue;
+        user.push_back(t);
+    }
+    if (hasHotkey) user.emplace_back(kTagHotkey);
+    const std::string err = bank.setTags(id, user);
+    if (!err.empty()) return err;
+    bank.saveToJson(soundsFile, hotkeys.allSoundCombos());
+    return "";
+}
+
+std::string App::addSoundTag(std::uint64_t id, const std::string& tag) {
+    if (toLower(tag) == kTagHotkey) return "встроенный тег — назначь хоткей";
+    const std::string err = bank.addTag(id, tag);
+    if (!err.empty()) return err;
+    bank.saveToJson(soundsFile, hotkeys.allSoundCombos());
+    return "";
+}
+
+std::string App::removeSoundTag(std::uint64_t id, const std::string& tag) {
+    if (toLower(tag) == kTagHotkey) return "встроенный тег — сними хоткей";
+    const std::string err = bank.removeTag(id, tag);
+    if (!err.empty()) return err;
+    bank.saveToJson(soundsFile, hotkeys.allSoundCombos());
+    return "";
+}
+
+std::string App::bindSoundHotkey(std::uint64_t id, const std::string& combo) {
+    const Sound* s = bank.find(id);
+    if (!s) return "no sound with id " + std::to_string(id);
+    std::string err;
+    if (combo.empty()) {
+        hotkeys.unbindSound(id);
+        bank.removeTag(id, kTagHotkey);
+    } else {
+        err = hotkeys.bindSound(id, combo);
+        if (err.empty()) bank.addTag(id, kTagHotkey);
+    }
+    saveAll();
+    return err;
+}
+
+// ------------------------------------------------------------ audio editor
+
+std::string App::editSound(std::uint64_t id, const nlohmann::json& def) {
+    const Sound* victim = bank.find(id);
+    if (!victim) return "no sound with id " + std::to_string(id);
+
+    // Never mutate PCM while the audio callback may be reading it.
+    Command stop;
+    stop.type = Command::Type::StopSound;
+    stop.soundId = id;
+    engine.submit(stop);
+    engine.drainCommands();
+    for (const auto& v : engine.mixer().snapshot())
+        if (v.soundId == id) return "звук ещё играет — останови его и повтори";
+
+    auto getNum = [&](const char* key, double fallback) {
+        if (!def.contains(key) || !def.at(key).is_number()) return fallback;
+        return def.at(key).get<double>();
+    };
+    double trimStart = std::max(0.0, getNum("trimStart", 0.0));
+    double trimEnd = getNum("trimEnd", 0.0); // 0 = full length
+    const float gain = float(std::max(0.0, std::min(4.0, getNum("gain", 1.0))));
+
+    std::vector<SoundRegion> regions;
+    if (def.contains("regions") && def.at("regions").is_array()) {
+        for (const auto& r : def.at("regions")) {
+            if (!r.is_object()) continue;
+            SoundRegion reg;
+            reg.startSec = std::max(0.0, r.value("start", 0.0));
+            reg.endSec = std::max(0.0, r.value("end", 0.0));
+            reg.gain = float(std::max(0.0, std::min(4.0, r.value("gain", 1.0))));
+            if (reg.endSec - reg.startSec > 0.01) regions.push_back(reg);
+        }
+        std::sort(regions.begin(), regions.end(),
+                  [](const SoundRegion& a, const SoundRegion& b) { return a.startSec < b.startSec; });
+    }
+
+    const std::string err = bank.applyEdits(id, trimStart, trimEnd, gain, regions);
+    if (!err.empty()) return err;
+    bank.saveToJson(soundsFile, hotkeys.allSoundCombos());
+    return "";
+}
+
+// -------------------------------------------------------- Windows integration
+
+bool App::autoStartEnabled() const {
+    return isAutoStartEnabled();
+}
+
+std::string App::setAutoStart(bool on) {
+    return vd::setAutoStart(on);
+}
+
+std::string App::setRunAsAdmin(bool on, bool& relaunching) {
+    relaunching = false;
+    if (!on) {
+        settings.runAsAdmin = false;
+        settings.save(settingsFile);
+        return "";
+    }
+    if (isElevated()) {
+        settings.runAsAdmin = true;
+        settings.save(settingsFile);
+        return "";
+    }
+
+    // Persist first, then ask Windows to relaunch us elevated. If the user
+    // declines the UAC prompt, keep the setting off so they are not locked
+    // out of the toggle on the next launch.
+    settings.runAsAdmin = true;
+    settings.save(settingsFile);
+    const ElevateResult r = relaunchElevated(cliMode ? "--cli" : "");
+    if (r == ElevateResult::Launched) {
+        relaunching = true;
+        return "";
+    }
+    settings.runAsAdmin = false;
+    settings.save(settingsFile);
+    if (r == ElevateResult::Cancelled) return "Отменено — запуск от имени администратора не включён";
+    return "Не удалось запустить приложение от имени администратора";
+}
+
+bool App::maybeElevate(const std::string& args) {
+    // Guard against an elevation loop if the token check ever misreports.
+    if (args.find("--elevated") != std::string::npos) return false;
+    Settings s;
+    if (!s.load(settingsFile) || !s.runAsAdmin || isElevated()) return false;
+    const ElevateResult r = relaunchElevated(args);
+    if (r == ElevateResult::Launched) {
+        log::info("relaunching elevated (runAsAdmin)");
+        return true;
+    }
+    log::warn("elevation was not started (%s) - continuing normally",
+              r == ElevateResult::Cancelled ? "cancelled by user" : "failed");
+    // Do not silently disable the preference on a cancelled startup prompt:
+    // the user can still turn it off in Settings.
+    return false;
 }
 
 // ---------------------------------------------------------------- characters
@@ -975,32 +1133,52 @@ nlohmann::json App::statusJson() const {
                                          double(s->eq[4].load())});
         auto hk = soundCombos.find(s->id);
         e["hotkey"] = (hk == soundCombos.end()) ? std::string() : hk->second;
+        nlohmann::json tags = nlohmann::json::array();
+        for (const std::string& t : s->tags) tags.push_back(t);
+        e["tags"] = std::move(tags);
+        nlohmann::json regions = nlohmann::json::array();
+        for (const SoundRegion& r : s->regions)
+            regions.push_back({{"start", r.startSec}, {"end", r.endSec}, {"gain", double(r.gain)}});
+        e["edits"] = {{"trimStart", s->trimStart},
+                      {"trimEnd", s->trimEnd},
+                      {"gain", double(s->editGain)},
+                      {"regions", std::move(regions)}};
 
         // Waveform peaks: 256 buckets of max amplitude, normalized to 0..1.
-        nlohmann::json peaks = nlohmann::json::array();
+        // `peaks` is the (possibly trimmed/edited) playback waveform;
+        // `rawPeaks` is the full source used by the audio editor.
         constexpr std::size_t kPeaks = 256;
-        if (s->frames > 0 && !s->pcm.empty()) {
-            std::vector<float> bucket(kPeaks, 0.0f);
-            const std::size_t total = s->pcm.size();
-            const std::size_t bucketSize = total / kPeaks + 1;
-            float maxPeak = 1e-9f;
-            for (std::size_t b = 0; b < kPeaks; ++b) {
-                const std::size_t from = b * bucketSize;
-                if (from >= total) break;
-                const std::size_t to = std::min(total, from + bucketSize);
-                float m = 0.0f;
-                for (std::size_t i = from; i < to; i += 2) {
-                    const float a = std::fabs(s->pcm[i]);
-                    if (a > m) m = a;
+        auto peaksOf = [&](const std::vector<float>& pcm) {
+            nlohmann::json peaks = nlohmann::json::array();
+            if (!pcm.empty()) {
+                std::vector<float> bucket(kPeaks, 0.0f);
+                const std::size_t total = pcm.size();
+                const std::size_t bucketSize = total / kPeaks + 1;
+                float maxPeak = 1e-9f;
+                for (std::size_t b = 0; b < kPeaks; ++b) {
+                    const std::size_t from = b * bucketSize;
+                    if (from >= total) break;
+                    const std::size_t to = std::min(total, from + bucketSize);
+                    float m = 0.0f;
+                    for (std::size_t i = from; i < to; i += 2) {
+                        const float a = std::fabs(pcm[i]);
+                        if (a > m) m = a;
+                    }
+                    bucket[b] = m;
+                    if (m > maxPeak) maxPeak = m;
                 }
-                bucket[b] = m;
-                if (m > maxPeak) maxPeak = m;
+                for (std::size_t b = 0; b < kPeaks; ++b) peaks.push_back(bucket[b] / maxPeak);
+            } else {
+                for (std::size_t b = 0; b < kPeaks; ++b) peaks.push_back(0.0f);
             }
-            for (std::size_t b = 0; b < kPeaks; ++b) peaks.push_back(bucket[b] / maxPeak);
-        } else {
-            for (std::size_t b = 0; b < kPeaks; ++b) peaks.push_back(0.0f);
-        }
-        e["peaks"] = std::move(peaks);
+            return peaks;
+        };
+        e["peaks"] = peaksOf(s->pcm);
+        e["rawPeaks"] = peaksOf(s->sourcePcm.empty() ? s->pcm : s->sourcePcm);
+        e["sourceDur"] = (s->sourcePcm.empty() ? s->durationSec
+                                               : double(s->sourcePcm.size() /
+                                                        std::max(1u, s->channels)) /
+                                                     std::max(1u, s->sampleRate));
         soundsArr.push_back(std::move(e));
     }
     j["sounds"] = std::move(soundsArr);
@@ -1057,6 +1235,12 @@ nlohmann::json App::statusJson() const {
 j["micUnderruns"] = double(engine.micUnderruns());
     j["latencyMode"] = engine.latencyMode();
     j["hotkeys"] = {{"voice", hotkeys.voiceToggleCombo()}, {"ai", hotkeys.aiToggleCombo()}};
+    nlohmann::json allTags = nlohmann::json::array();
+    for (const std::string& t : bank.allTags()) allTags.push_back(t);
+    j["allTags"] = std::move(allTags);
+    j["autoStart"] = isAutoStartEnabled();
+    j["runAsAdmin"] = settings.runAsAdmin;
+    j["elevated"] = isElevated();
     return j;
 }
 

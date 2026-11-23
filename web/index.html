@@ -121,18 +121,18 @@
         <div class="pane-tools">
           <div class="search-wrap">
             <svg viewBox="0 0 24 24" class="search-icon"><circle cx="10" cy="10" r="6"/><path d="M15 15l5 5"/></svg>
-            <input type="text" id="soundSearch" placeholder="поиск..." class="search-input">
+            <input type="text" id="soundSearch" placeholder="имя или тег..." class="search-input">
           </div>
           <span class="spacer"></span>
           <button class="s-ctl on" id="viewGrid" aria-label="Карточки"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/></svg></button>
           <button class="s-ctl" id="viewList" aria-label="Список"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
           <button class="btn" id="refreshSoundsBtn" title="Подхватить новые и удалённые файлы из папки без перезапуска">⟳ Обновить</button>
-          <button class="btn" id="stopPreviewBtn" title="Остановить предпрослушивание звуков">⏹ Предпросмотр</button>
           <button class="btn" id="stopAllBtn">Стоп все</button>
-          <button class="btn primary" id="addSoundBtn">+ Добавить (несколько)</button>
+          <button class="btn primary" id="addSoundBtn">+ Добавить</button>
         </div>
+        <div id="tagFilter" class="tag-filter"></div>
         <div class="note" style="margin:0 0 10px">
-          Перетащи аудиофайлы в окно — они сразу скопируются в <span class="mono">data\sounds</span>, можно сразу несколько. Файлы, добавленные в папку вручную, подхватываются кнопкой <b>⟳ Обновить</b> без перезапуска.
+          Перетащи аудиофайлы в окно — они сразу скопируются в <span class="mono">data\sounds</span>, можно сразу несколько. Файлы, добавленные в папку вручную, подхватываются кнопкой <b>⟳ Обновить</b> без перезапуска. Тег <span class="tag builtin">hotkey</span> ставится автоматически, когда звуку назначена горячая клавиша.
         </div>
         <div id="soundGrid" class="sound-grid"></div>
         <div id="soundList" class="sound-list hidden"></div>
@@ -199,6 +199,12 @@
             <div class="note">Меньше = быстрее отклик, больше = стабильнее.</div>
           </div>
           <div class="panel">
+            <h3 class="panel-title">Запуск</h3>
+            <div class="row"><span>Автозапуск с Windows</span><input type="checkbox" id="autoStartChk"></div>
+            <div class="row"><span>Всегда от имени админа</span><input type="checkbox" id="runAdminChk"></div>
+            <div class="note" id="runNote">При включении «от имени админа» приложение перезапустится с запросом UAC. Настройка действует при каждом запуске.</div>
+          </div>
+          <div class="panel">
             <h3 class="panel-title">Хоткеи</h3>
             <div class="row"><span>Хоткей: голос</span><button class="keycap wide" id="hkVoice">— клик —</button></div>
             <div class="row"><span>Хоткей: AI</span><button class="keycap wide" id="hkAi">— клик —</button></div>
@@ -233,6 +239,53 @@
     <div class="dialog-actions center">
       <button class="btn" id="confirmNo">Отмена</button>
       <button class="btn danger" id="confirmYes">Удалить</button></div></div>
+</div>
+
+<div id="tagOverlay" class="overlay hidden">
+  <div class="dialog">
+    <h3>Теги звука</h3>
+    <p class="dim" id="tagEditName" style="font-size:11px"></p>
+    <div id="tagEditCurrent" class="tag-filter"></div>
+    <div class="form-grid" style="margin-top:12px">
+      <label>Новый тег<input type="text" id="tagNew" maxlength="32" placeholder="например: мемы"></label>
+    </div>
+    <div class="dialog-actions center">
+      <button class="btn" id="tagAdd">+ Добавить</button>
+      <button class="btn primary" id="tagDone">Готово</button>
+    </div>
+  </div>
+</div>
+
+<div id="editOverlay" class="overlay hidden">
+  <div class="dialog wide editor-dialog">
+    <div class="editor-head">
+      <h3 id="ewTitle">Редактор звука</h3>
+      <button class="btn" id="ewClose" aria-label="Закрыть">✕</button>
+    </div>
+    <p class="dim" style="font-size:11px;margin:0 0 8px">
+      Перетащи границы — обрезать. Выдели участок на волне — добавить изменения громкости.
+    </p>
+    <div class="ew-wave" id="ewWave"></div>
+    <div class="form-grid" style="margin-top:12px">
+      <label>Начало, с<input type="number" id="ewStart" min="0" step="0.01" value="0"></label>
+      <label>Конец, с<input type="number" id="ewEnd" min="0" step="0.01" value="0"></label>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <span>Общая громкость</span>
+      <input type="range" id="ewGain" min="0" max="400" step="5" value="100">
+      <output class="mono" id="ewGainVal">100%</output>
+    </div>
+    <div class="editor-section">
+      <span class="panel-title">Участки громкости</span>
+      <div id="ewRegions" class="reg-list"></div>
+      <button class="btn" id="ewAddRegion" disabled>+ Добавить выделенный участок</button>
+    </div>
+    <div class="dialog-actions center">
+      <button class="btn danger" id="ewReset">Сбросить правки</button>
+      <button class="btn" id="ewCancel">Отмена</button>
+      <button class="btn primary" id="ewApply">Применить</button>
+    </div>
+  </div>
 </div>
 
 <div id="convertOverlay" class="overlay hidden">

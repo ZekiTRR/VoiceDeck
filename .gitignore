@@ -29,3 +29,5 @@ models/
 uiout.txt
 uierr.txt
 dec_test.obj
+
+non-deployment-directory/*

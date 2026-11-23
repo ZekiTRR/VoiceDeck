@@ -4,8 +4,10 @@
 #include "nlohmann/json.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <fstream>
+#include <set>
 
 namespace vd {
 namespace {
@@ -19,7 +21,94 @@ std::filesystem::path utf8ToPath(const std::string& s) {
     return std::filesystem::path(reinterpret_cast<const char8_t*>(s.c_str()));
 }
 
+std::string lower(std::string s) {
+    for (char& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+std::string trimTag(std::string s) {
+    const auto first = s.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return {};
+    const auto last = s.find_last_not_of(" \t\r\n");
+    return s.substr(first, last - first + 1);
+}
+
 } // namespace
+
+std::vector<std::string> SoundBank::normalizeTags(const std::vector<std::string>& tags) {
+    std::vector<std::string> out;
+    std::set<std::string> seen;
+    for (const std::string& raw : tags) {
+        std::string t = trimTag(raw);
+        if (t.empty()) continue;
+        if (t.size() > 32) t.resize(32);
+        if (!seen.insert(lower(t)).second) continue;
+        out.push_back(std::move(t));
+        if (out.size() >= 16) break;
+    }
+    return out;
+}
+
+std::string SoundBank::setTags(std::uint64_t id, const std::vector<std::string>& tags) {
+    Sound* s = find(id);
+    if (!s) return "no sound with id " + std::to_string(id);
+    s->tags = normalizeTags(tags);
+    return "";
+}
+
+std::string SoundBank::addTag(std::uint64_t id, const std::string& tag) {
+    Sound* s = find(id);
+    if (!s) return "no sound with id " + std::to_string(id);
+    std::vector<std::string> tags = s->tags;
+    tags.push_back(tag);
+    s->tags = normalizeTags(tags);
+    return "";
+}
+
+std::string SoundBank::removeTag(std::uint64_t id, const std::string& tag) {
+    Sound* s = find(id);
+    if (!s) return "no sound with id " + std::to_string(id);
+    const std::string key = lower(trimTag(tag));
+    std::vector<std::string> kept;
+    for (const std::string& t : s->tags)
+        if (lower(t) != key) kept.push_back(t);
+    s->tags = std::move(kept);
+    return "";
+}
+
+bool SoundBank::hasTag(std::uint64_t id, const std::string& tag) const {
+    const Sound* s = find(id);
+    if (!s) return false;
+    const std::string key = lower(trimTag(tag));
+    for (const std::string& t : s->tags)
+        if (lower(t) == key) return true;
+    return false;
+}
+
+std::vector<std::string> SoundBank::allTags() const {
+    std::vector<std::string> out;
+    std::set<std::string> seen;
+    for (const Sound* s : snapshot()) {
+        for (const std::string& t : s->tags)
+            if (seen.insert(lower(t)).second) out.push_back(t);
+    }
+    std::sort(out.begin(), out.end(), [](const std::string& a, const std::string& b) {
+        return lower(a) < lower(b);
+    });
+    return out;
+}
+
+std::string SoundBank::applyEdits(std::uint64_t id, double trimStart, double trimEnd, float gain,
+                                  const std::vector<SoundRegion>& regions) {
+    Sound* s = find(id);
+    if (!s) return "no sound with id " + std::to_string(id);
+    s->trimStart = trimStart;
+    s->trimEnd = trimEnd;
+    s->editGain = std::max(0.0f, std::min(4.0f, gain));
+    s->regions = regions;
+    s->applyEdits();
+    return "";
+}
 
 std::uint64_t SoundBank::add(const std::filesystem::path& path, const std::string& name,
                              std::uint32_t sampleRate, std::uint32_t channels, std::string& err) {
@@ -174,6 +263,40 @@ std::map<std::uint64_t, std::string> SoundBank::loadFromJson(const std::filesyst
                 for (int i = 0; i < 5 && std::size_t(i) < eb->size(); ++i)
                     s->eq[i].store(float((*eb)[std::size_t(i)].get<double>()));
             }
+            // Tags (user-defined plus the built-in "hotkey" flag).
+            std::vector<std::string> tags;
+            if (e.contains("tags") && e.at("tags").is_array())
+                for (const auto& t : e.at("tags"))
+                    if (t.is_string()) tags.push_back(t.get<std::string>());
+            const std::string hk = e.value("hotkey", std::string());
+            if (!hk.empty()) tags.emplace_back(kTagHotkey);
+            s->tags = normalizeTags(tags);
+
+            // Non-destructive editor state. Rebuild the PCM from the pristine
+            // decode so the waveform, duration and playback all match.
+            const double trimStart = e.value("trimStart", 0.0);
+            const double trimEnd = e.value("trimEnd", 0.0);
+            const float editGain = float(e.value("editGain", 1.0));
+            std::vector<SoundRegion> regions;
+            if (e.contains("regions") && e.at("regions").is_array()) {
+                for (const auto& r : e.at("regions")) {
+                    if (!r.is_object()) continue;
+                    SoundRegion reg;
+                    reg.startSec = std::max(0.0, r.value("start", 0.0));
+                    reg.endSec = std::max(0.0, r.value("end", 0.0));
+                    reg.gain = std::max(0.0f, std::min(4.0f, float(r.value("gain", 1.0))));
+                    if (reg.endSec - reg.startSec > 0.01) regions.push_back(reg);
+                }
+            }
+            std::sort(regions.begin(), regions.end(),
+                      [](const SoundRegion& a, const SoundRegion& b) { return a.startSec < b.startSec; });
+            if (trimStart != 0.0 || trimEnd != 0.0 || editGain != 1.0f || !regions.empty()) {
+                s->trimStart = trimStart;
+                s->trimEnd = trimEnd;
+                s->editGain = editGain;
+                s->regions = std::move(regions);
+                s->applyEdits();
+            }
         }
         if (e.contains("hotkey")) combos[id] = e.value("hotkey", std::string());
         maxId = std::max(maxId, id);
@@ -202,6 +325,16 @@ bool SoundBank::saveToJson(const std::filesystem::path& file,
             double(s->eq[3].load(std::memory_order_relaxed)),
             double(s->eq[4].load(std::memory_order_relaxed)),
         });
+        nlohmann::json tags = nlohmann::json::array();
+        for (const std::string& t : s->tags) tags.push_back(t);
+        e["tags"] = std::move(tags);
+        e["trimStart"] = s->trimStart;
+        e["trimEnd"] = s->trimEnd;
+        e["editGain"] = double(s->editGain);
+        nlohmann::json regions = nlohmann::json::array();
+        for (const SoundRegion& r : s->regions)
+            regions.push_back({{"start", r.startSec}, {"end", r.endSec}, {"gain", double(r.gain)}});
+        e["regions"] = std::move(regions);
         auto it = hotkeys.find(s->id);
         if (it != hotkeys.end()) e["hotkey"] = it->second;
         j["sounds"].push_back(std::move(e));

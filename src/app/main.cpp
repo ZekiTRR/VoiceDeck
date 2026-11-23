@@ -90,6 +90,13 @@ void printHelp() {
     vd::log::info("  volume <id> <0..200>         per-clip volume, percent");
     vd::log::info("  loop <id> on|off             loop the clip on next plays");
     vd::log::info("  hotkey <id|stopall|preset|voice|ai> ... <combo>");
+    vd::log::info("  tags                         list all tags (adds 'hotkey' automatically)");
+    vd::log::info("  tags <tag>                   list clips carrying this tag");
+    vd::log::info("  tag <id> <tag...>            replace a clip's tags");
+    vd::log::info("  tagadd|tagrm <id> <tag>      add/remove one tag");
+    vd::log::info("  edit <id> <json>             e.g. edit 1 {'trimStart':1,'trimEnd':5,'gain':1.5,'regions':[{'start':0,'end':1,'gain':0.5}]}");
+    vd::log::info("  autostart on|off             launch VoiceDeck with Windows");
+    vd::log::info("  admin on|off                 always run as administrator (UAC relaunch)");
     vd::log::info("  bypass on|off                voice path on/off (clip output continues)");
     vd::log::info("  ducking on|off               auto-lower clips while you speak");
     vd::log::info("  presets                      list voice characters");
@@ -390,11 +397,102 @@ bool handleCommand(App& app, const std::string& raw, bool& quit) {
                 vd::log::error("no sound with id %s", t[1].c_str());
                 return true;
             }
-            err = stopAll ? app.hotkeys.bindStopAll(t[2]) : app.hotkeys.bindSound(id, t[2]);
+            err = stopAll ? app.hotkeys.bindStopAll(t[2]) : app.bindSoundHotkey(id, t[2]);
             if (err.empty())
                 vd::log::info("hotkey %s -> %s", t[2].c_str(), stopAll ? "stop all" : t[1].c_str());
         }
         if (!err.empty()) vd::log::error("hotkey: %s", err.c_str());
+        return true;
+    }
+
+    if (c == "tags") {
+        const auto all = app.bank.allTags();
+        const bool filter = t.size() >= 2;
+        if (!filter) {
+            vd::log::info("tags (%zu):", all.size());
+            for (const auto& tag : all) vd::log::info("  %s", tag.c_str());
+        }
+        const std::string want = toLower(filter ? t[1] : std::string());
+        int shown = 0;
+        for (const vd::Sound* s : app.bank.snapshot()) {
+            bool match = !filter;
+            for (const auto& tag : s->tags)
+                if (toLower(tag) == want) match = true;
+            if (!match) continue;
+            std::string list;
+            for (const auto& tag : s->tags) list += (list.empty() ? "" : ", ") + tag;
+            vd::log::info("  #%llu  %-24s [%s]", static_cast<unsigned long long>(s->id),
+                          s->name.c_str(), list.c_str());
+            ++shown;
+        }
+        if (filter && shown == 0) vd::log::info("no clips with tag '%s'", t[1].c_str());
+        return true;
+    }
+
+    if (c == "tag" || c == "tagadd" || c == "tagrm") {
+        if (t.size() < 3) {
+            vd::log::warn("usage: tag <id> <tag...> | tagadd|tagrm <id> <tag>");
+            return true;
+        }
+        const std::uint64_t id = parseId(t[1]);
+        std::string err;
+        if (c == "tag") {
+            std::vector<std::string> tags(t.begin() + 2, t.end());
+            err = app.setSoundTags(id, nlohmann::json(tags));
+        } else if (c == "tagadd") {
+            err = app.addSoundTag(id, t[2]);
+        } else {
+            err = app.removeSoundTag(id, t[2]);
+        }
+        if (err.empty()) app.saveAll();
+        else vd::log::error("tags: %s", err.c_str());
+        return true;
+    }
+
+    if (c == "edit") {
+        if (t.size() < 3) {
+            vd::log::warn("usage: edit <id> <json>   (use ' instead of \", e.g. edit 1 {'gain':1.5})");
+            return true;
+        }
+        // The shell tokenizer eats double quotes, so the CLI dialect uses
+        // single quotes for JSON strings. Rejoin all remaining tokens to
+        // allow spaces inside the object.
+        std::string raw;
+        for (std::size_t i = 2; i < t.size(); ++i) {
+            if (i > 2) raw += ' ';
+            raw += t[i];
+        }
+        for (char& ch : raw)
+            if (ch == '\'') ch = '"';
+        auto def = nlohmann::json::parse(raw, nullptr, false);
+        if (def.is_discarded() || !def.is_object()) {
+            vd::log::error("edit: invalid JSON (use single quotes for keys)");
+            return true;
+        }
+        const std::string err = app.editSound(parseId(t[1]), def);
+        if (err.empty()) vd::log::info("sound #%s edited (non-destructively)", t[1].c_str());
+        else vd::log::error("edit: %s", err.c_str());
+        return true;
+    }
+
+    if (c == "autostart" || c == "admin") {
+        const bool on = t.size() >= 2 ? (toLower(t[1]) == "on")
+                                      : !(c == "autostart" ? app.autoStartEnabled()
+                                                           : app.settings.runAsAdmin);
+        std::string err;
+        if (c == "autostart") err = app.setAutoStart(on);
+        else {
+            bool relaunching = false;
+            err = app.setRunAsAdmin(on, relaunching);
+            if (relaunching) {
+                vd::log::info("restarting elevated...");
+                app.hotkeys.stop();
+                app.engine.shutdown();
+                std::exit(0);
+            }
+        }
+        if (err.empty()) vd::log::info("%s: %s", c.c_str(), on ? "ON" : "OFF");
+        else vd::log::error("%s: %s", c.c_str(), err.c_str());
         return true;
     }
 
@@ -725,9 +823,13 @@ int main(int argc, char** argv) {
     }
 
     const bool cliMode = (argc > 1 && std::strcmp(argv[1], "--cli") == 0);
-    vd::log::info("VoiceDeck 1.0 - Soundpad + Voicemod (DSP + AI), C++20");
+    vd::log::info("VoiceDeck 1.2.0 - Soundpad + Voicemod (DSP + AI), C++20");
 
     App app;
+    app.cliMode = cliMode;
+    // When "always run as administrator" is enabled, hand off to an elevated
+    // copy before initializing the audio engine (avoids a double init).
+    if (app.maybeElevate(cliMode ? "--cli" : "")) return 0;
     if (!cliMode) {
         // The UI thread must be STA. Do this BEFORE the engine init:
         // miniaudio's WASAPI backend tries COINIT_MULTITHREADED here and

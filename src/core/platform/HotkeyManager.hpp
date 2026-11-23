@@ -40,6 +40,7 @@ public:
     std::string bindStopAll(const std::string& combo);
     std::string bindVoiceToggle(const std::string& combo); // DSP chain on/off
     std::string bindAiToggle(const std::string& combo);    // AI voice on/off
+    void unbindSound(std::uint64_t soundId);              // clears a sound's hotkey
     void unbindPreset(std::uint64_t presetIndex);          // preset removal rebinds
 
     // Persistence helpers (soundId/presetIndex -> combo).

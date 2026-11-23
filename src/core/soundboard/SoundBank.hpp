@@ -52,6 +52,23 @@ public:
     // CLI thread only (listings / persistence). Sorted by slot order.
     std::vector<const Sound*> snapshot() const;
 
+    // --- tags ---------------------------------------------------------------
+    // CLI thread only. Tags are trimmed, de-duplicated case-insensitively and
+    // capped at 16 entries of 32 characters each. Returns "" on success.
+    std::string setTags(std::uint64_t id, const std::vector<std::string>& tags);
+    std::string addTag(std::uint64_t id, const std::string& tag);
+    std::string removeTag(std::uint64_t id, const std::string& tag);
+    bool hasTag(std::uint64_t id, const std::string& tag) const;
+    // Sorted, unique list of every tag in the library (for filter chips).
+    std::vector<std::string> allTags() const;
+    static std::vector<std::string> normalizeTags(const std::vector<std::string>& tags);
+
+    // --- in-app audio editor -------------------------------------------------
+    // CLI thread only. Rebuilds the clip PCM from the pristine source. No
+    // files are modified. Returns "" on success.
+    std::string applyEdits(std::uint64_t id, double trimStart, double trimEnd, float gain,
+                           const std::vector<SoundRegion>& regions);
+
     // CLI thread only. Loads a library file; returns soundId -> hotkey combo
     // pairs (including a 0 -> combo entry for the global "stop all" hotkey).
     // Relative paths resolve against the sound folder.

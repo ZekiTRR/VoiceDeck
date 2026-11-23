@@ -26,6 +26,10 @@ struct Settings {
     // 2 = high quality (~20ms + 53ms). Trade CPU load for delay.
     int latencyMode = 1;
 
+    // Windows integration. `runAsAdmin` relaunches the app through UAC on
+    // startup; `autoStart` lives in HKCU\...\Run (see AutoStart.hpp).
+    bool runAsAdmin = false;
+
     // Extra global hotkeys.
     std::string voiceHotkey; // toggles the DSP chain
     std::string aiHotkey;    // toggles the AI voice

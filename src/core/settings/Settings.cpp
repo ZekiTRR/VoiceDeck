@@ -38,6 +38,7 @@ bool Settings::load(const std::filesystem::path& file) {
         aiAutoLimit = j.value("aiAutoLimit", true);
         aiFlapLimit = j.value("aiFlapLimit", 8);
         latencyMode = j.value("latencyMode", 1);
+        runAsAdmin = j.value("runAsAdmin", false);
         voiceHotkey = j.value("voiceHotkey", "");
         aiHotkey = j.value("aiHotkey", "");
     } catch (...) {
@@ -59,6 +60,7 @@ bool Settings::save(const std::filesystem::path& file) const {
     j["aiAutoLimit"] = aiAutoLimit;
     j["aiFlapLimit"] = aiFlapLimit;
     j["latencyMode"] = latencyMode;
+    j["runAsAdmin"] = runAsAdmin;
     j["voiceHotkey"] = voiceHotkey;
     j["aiHotkey"] = aiHotkey;
 

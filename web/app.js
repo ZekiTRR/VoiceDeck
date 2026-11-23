@@ -19,6 +19,9 @@ const ICONS={
   trash:`<svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M8 7l.8 13h6.4L16 7"/></svg>`,
   preview:`<svg viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5Z"/><path d="M4 4l16 16" stroke="currentColor" stroke-width="1.4" fill="none"/></svg>`,
   edit:`<svg viewBox="0 0 24 24"><path d="M14 5l5 5L8 21H3v-5L14 5ZM12 7l5 5"/></svg>`,
+  volume:`<svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4Z"/><path d="M16.5 9a4 4 0 0 1 0 6"/></svg>`,
+  keyboard:`<svg viewBox="0 0 24 24"><path d="M5 6h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Z"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/></svg>`,
+  tag:`<svg viewBox="0 0 24 24"><path d="M12.5 3H4v8.5L12.5 20 20 12.5 12.5 3Z"/><path d="M7.5 7.5h.01"/></svg>`,
 };
 function presetIcon(name){
   const k=String(name).toLowerCase();
@@ -44,6 +47,10 @@ function presetIcon(name){
 let S=null,tab="voice",hkTarget=null;
 const playingIds=new Set(),pausedIds=new Set(),previewIds=new Set();
 let soundView="grid",searchQuery="",settingsRenderedOnce=false,editingPreset=-1,editorDismissed=false;
+let activeTag=null;                 // selected tag filter chip
+let tagState=null;                  // {id, tags} for the tag dialog
+let editState=null;                 // audio editor working copy
+let ewDrag=null;                    // {mode:'trim'|'sel', side, anchor}
 let liveTimer=null; // debounce for live preset updates
 const editorFaders=[], voiceFaders=[];
 
@@ -128,9 +135,13 @@ function demoState(){
       custom:i===5,hotkey:i===5?"Ctrl+Alt+F1":"",eq:[0,0,0,0,0,0,0,0],chain:[]}));
   const pk=[];for(let i=0;i<256;i++)pk.push(0.3+0.6*Math.abs(Math.sin(i*0.08)*Math.cos(i*0.03)));
   return {type:"state",dspOn:true,bypassOn:true,duckingOn:false,monitorOn:false,preset:2,presets:P,
-    sounds:[{id:1,name:"airhorn",dur:2.1,gain:1,loop:false,hotkey:"Ctrl+Alt+1",eq:[0,0,0,0,0],peaks:pk},
-      {id:2,name:"bell",dur:1.2,gain:0.8,loop:false,hotkey:"",eq:[0,0,0,0,0],peaks:pk},
-      {id:3,name:"gong",dur:4.0,gain:1,loop:false,hotkey:"",eq:[0,0,0,0,0],peaks:pk}],
+    sounds:[{id:1,name:"airhorn",dur:2.1,gain:1,loop:false,hotkey:"Ctrl+Alt+1",eq:[0,0,0,0,0],peaks:pk,
+      rawPeaks:pk,sourceDur:2.1,tags:["hotkey","сигнал"],edits:{trimStart:0,trimEnd:0,gain:1,regions:[]}},
+      {id:2,name:"bell",dur:1.2,gain:0.8,loop:false,hotkey:"",eq:[0,0,0,0,0],peaks:pk,
+      rawPeaks:pk,sourceDur:1.2,tags:["мелочи"],edits:{trimStart:0,trimEnd:0,gain:1,regions:[]}},
+      {id:3,name:"gong",dur:4.0,gain:1,loop:false,hotkey:"",eq:[0,0,0,0,0],peaks:pk,
+      rawPeaks:pk,sourceDur:4.0,tags:[],edits:{trimStart:0,trimEnd:0,gain:1,regions:[]}}],
+    allTags:["hotkey","мелочи","сигнал"],autoStart:false,runAsAdmin:false,elevated:false,
     ai:{enabled:true,ready:true,voice:"Narrator (male)",device:"GTX 1080",usesGpu:true,provider:"dml",
       modelsInstalled:true,latency:290,underruns:0,pitch:0,margin:150,fade:30,autolimit:true,flapLimit:8,
       voices:[{name:"Narrator (male)",gender:"male",pitch:0},{name:"Presenter (female)",gender:"female",pitch:12}]},
@@ -150,7 +161,7 @@ function renderState(){
   if(!S)return;
   setSwitch($("powerBtn"),S.dspOn&&S.bypassOn);setSwitch($("aiPowerBtn"),S.ai.enabled);
   setSwitch($("monitorBtn"),S.devices.curMonitor>=0);
-  renderPresets();renderSounds();renderAi();
+  renderPresets();renderTagFilter();renderSounds();renderAi();
   if(!settingsRenderedOnce){renderSettings();settingsRenderedOnce=true;}
   updateTopLive();
   // Auto-open the editor for the currently active preset (safe: don't let
@@ -286,26 +297,66 @@ buildEq($("peEq"),editorFaders,()=>sendLiveUpdate());
 
 // ---- Sounds ----
 function getFilteredSounds(){
-  if(!searchQuery)return S.sounds;
-  const q=searchQuery.toLowerCase();
-  return S.sounds.filter(s=>s.name.toLowerCase().includes(q));
+  const q=searchQuery.toLowerCase().trim();
+  return S.sounds.filter(s=>{
+    if(activeTag && !(s.tags||[]).some(t=>String(t).toLowerCase()===activeTag.toLowerCase()))return false;
+    if(!q)return true;
+    if(String(s.name).toLowerCase().includes(q))return true;
+    return (s.tags||[]).some(t=>String(t).toLowerCase().includes(q));
+  });
 }
+
+// Tag filter chips above the library. The built-in "hotkey" tag is just
+// another chip here — it is maintained by the host, not by the tag editor.
+function renderTagFilter(){
+  const c=$("tagFilter");if(!c||!S)return;
+  c.innerHTML="";
+  const mk=(label,count,tag,active)=>{
+    const b=document.createElement("button");
+    b.className="tag-chip"+(active?" active":"");
+    b.textContent=label+" ("+count+")";
+    if(tag===vdHotkeyTag())b.classList.add("builtin");
+    b.addEventListener("click",()=>{
+      activeTag=(activeTag===tag)?null:tag;
+      renderTagFilter();renderSounds();
+    });
+    return b;
+  };
+  c.appendChild(mk("все",S.sounds.length,null,activeTag===null));
+  for(const tag of (S.allTags||[])){
+    const n=S.sounds.filter(s=>(s.tags||[]).some(t=>String(t).toLowerCase()===String(tag).toLowerCase())).length;
+    c.appendChild(mk(tag,n,tag,activeTag===String(tag).toLowerCase()));
+  }
+}
+function vdHotkeyTag(){return "hotkey";}
 
 // Sound preview auto-restores voice self-monitoring when the clip ends.
 let previewTimer=null;
+function updatePreviewButtons(){
+  document.querySelectorAll("#soundGrid [data-preview], #soundList [data-preview]").forEach(btn=>{
+    const row=btn.closest(".scard, .srow");
+    const on=!!row&&previewIds.has(+row.dataset.id);
+    btn.classList.toggle("on",on);
+    btn.setAttribute("aria-pressed",String(on));
+    btn.title=on?"Остановить предпрослушивание":"Предпрослушать на динамики";
+  });
+}
 function stopPreviewNow(){
-  clearTimeout(previewTimer);
-  if(host)send({cmd:"stopPreview"});
-  previewIds.clear();
+  clearTimeout(previewTimer);previewTimer=null;
+  if(host&&previewIds.size)send({cmd:"stopPreview"});
+  previewIds.clear();updatePreviewButtons();
   toast("Предпрослушивание остановлено");
 }
+// One click starts preview, the next one stops it. Starting a different clip
+// replaces the previous preview.
 function doPreview(s){
+  if(previewIds.has(s.id)){stopPreviewNow();return;}
   send({cmd:"preview",id:s.id});
-  previewIds.add(s.id);
+  previewIds.clear();previewIds.add(s.id);updatePreviewButtons();
   clearTimeout(previewTimer);
   previewTimer=setTimeout(()=>{
     send({cmd:"stopPreview"});
-    previewIds.clear();
+    previewTimer=null;previewIds.clear();updatePreviewButtons();
   },Math.max(1500,Math.ceil((s.dur||2)*1000)+500));
   toast("Предпрослушивание: "+s.name);
 }
@@ -332,13 +383,26 @@ function makeSoundControls(container,s){
     doPreview(s);
   });
   const vol=container.querySelector("[data-vol]");
-  if(vol)vol.addEventListener("input",e=>send({cmd:"volume",id:s.id,pct:+e.target.value}));
+  if(vol)vol.addEventListener("input",e=>{
+    const out=container.querySelector("[data-volval]");
+    if(out)out.textContent=e.target.value+"%";
+    send({cmd:"volume",id:s.id,pct:+e.target.value});
+  });
   const loop=container.querySelector("[data-loop]");
-  if(loop)loop.addEventListener("click",()=>{send({cmd:"loop",id:s.id,on:!s.loop});s.loop=!s.loop;renderSounds();});
+  if(loop)loop.addEventListener("click",()=>{
+    send({cmd:"loop",id:s.id,on:!s.loop});s.loop=!s.loop;
+    loop.classList.toggle("on",s.loop);loop.setAttribute("aria-pressed",String(!!s.loop));
+    const sub=container.querySelector(".s-sub");
+    if(sub)sub.textContent=fmtSec(s.dur)+(s.loop?" · loop":"");
+  });
   const del=container.querySelector("[data-del]");
   if(del)del.addEventListener("click",async()=>{if(await uiConfirm("Удалить «"+s.name+"»?"))send({cmd:"remove",id:s.id});});
   const hk=container.querySelector("[data-hk]");
   if(hk)hk.addEventListener("click",e=>{e.stopPropagation();startHkCapture({target:"sound",id:s.id,combo:s.hotkey});});
+  const tagsBtn=container.querySelector("[data-tags]");
+  if(tagsBtn)tagsBtn.addEventListener("click",e=>{e.stopPropagation();openTagEditor(s.id);});
+  const editBtn=container.querySelector("[data-edit]");
+  if(editBtn)editBtn.addEventListener("click",e=>{e.stopPropagation();openEditDialog(s.id);});
   // Waveform seek
   const wave=container.querySelector("[data-wave]");
   if(wave)wave.addEventListener("click",(e)=>{
@@ -347,6 +411,250 @@ function makeSoundControls(container,s){
     send({cmd:"seek",id:s.id,frac:Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width))});
   });
 }
+
+// ---- Tags: per-clip editor -------------------------------------------------
+function findSound(id){return (S&&S.sounds||[]).find(s=>s.id===id)||null;}
+function isHotkeyTag(t){return String(t).toLowerCase()==="hotkey";}
+
+function openTagEditor(id){
+  const s=findSound(id);if(!s)return;
+  tagState={id:id,tags:(s.tags||[]).filter(t=>!isHotkeyTag(t))};
+  $("tagEditName").textContent=s.name;
+  $("tagNew").value="";
+  renderTagEditChips();
+  $("tagOverlay").classList.remove("hidden");
+  setTimeout(()=>{try{$("tagNew").focus();}catch(_){}},30);
+}
+function closeTagEditor(){$("tagOverlay").classList.add("hidden");tagState=null;}
+function renderTagEditChips(){
+  const c=$("tagEditCurrent");c.innerHTML="";
+  if(!tagState)return;
+  if(!tagState.tags.length)c.innerHTML='<span class="dim">тегов нет</span>';
+  tagState.tags.forEach((t,i)=>{
+    const chip=document.createElement("span");chip.className="tag";
+    chip.innerHTML=esc(t)+' <b class="tag-x" data-i="'+i+'" title="удалить">×</b>';
+    chip.querySelector(".tag-x").addEventListener("click",()=>{
+      tagState.tags.splice(i,1);renderTagEditChips();
+    });
+    c.appendChild(chip);
+  });
+  const s=findSound(tagState.id);
+  if(s&&(s.tags||[]).some(isHotkeyTag)){
+    const chip=document.createElement("span");chip.className="tag builtin";
+    chip.innerHTML='hotkey <b class="tag-x" title="снять хоткей">×</b>';
+    chip.querySelector(".tag-x").addEventListener("click",()=>{
+      send({cmd:"hotkeyOff",target:"sound",id:tagState.id});
+      toast("Хоткей снят — тег hotkey удалён");
+      closeTagEditor();
+    });
+    c.appendChild(chip);
+  }
+}
+function addTagFromInput(){
+  if(!tagState)return;
+  const v=($("tagNew").value||"").trim();if(!v)return;
+  if(v.toLowerCase()==="hotkey"){toast("Тег hotkey назначается автоматически");$("tagNew").value="";return;}
+  if(tagState.tags.some(t=>t.toLowerCase()===v.toLowerCase())){toast("Такой тег уже есть");return;}
+  tagState.tags.push(v.slice(0,32));$("tagNew").value="";renderTagEditChips();
+}
+$("tagAdd").addEventListener("click",addTagFromInput);
+$("tagNew").addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();addTagFromInput();}});
+$("tagDone").addEventListener("click",()=>{
+  if(tagState)send({cmd:"setSoundTags",id:tagState.id,tags:tagState.tags});
+  closeTagEditor();
+});
+
+// ---- In-app audio editor ---------------------------------------------------
+function closeEditDialog(){$("editOverlay").classList.add("hidden");editState=null;ewDrag=null;}
+function openEditDialog(id){
+  const s=findSound(id);if(!s)return;
+  const e=s.edits||{};
+  const dur=+(s.sourceDur||s.dur||0);
+  editState={
+    id:id,name:s.name,dur:dur,
+    peaks:(s.rawPeaks&&s.rawPeaks.length)?s.rawPeaks:(s.peaks||[]),
+    trimStart:Math.max(0,+e.trimStart||0),
+    trimEnd:+(e.trimEnd>0?e.trimEnd:dur),
+    gain:(e.gain!=null?+e.gain:1),
+    regions:(e.regions||[]).map(r=>({start:+r.start,end:+r.end,gain:+r.gain})),
+    sel:null
+  };
+  $("ewTitle").textContent="Редактор: "+s.name;
+  $("ewGain").value=Math.round(editState.gain*100);
+  $("ewGainVal").textContent=Math.round(editState.gain*100)+"%";
+  drawEditorWave();updateEditorValues();renderEditorRegions();
+  $("editOverlay").classList.remove("hidden");
+}
+function editorPct(t){return Math.max(0,Math.min(100,(t/Math.max(0.001,editState.dur))*100));}
+function drawEditorWave(){
+  const el=$("ewWave"),peaks=editState.peaks||[];
+  const step=Math.max(1,Math.ceil(peaks.length/128));
+  let d="";
+  for(let i=0;i<peaks.length;i+=step){
+    let m=0;for(let j=i;j<Math.min(peaks.length,i+step);++j)m=Math.max(m,peaks[j]||0);
+    const h=Math.max(2,Math.min(1,m)*96),x=i/step+0.2,y=(100-h)/2;
+    d+=`M${x.toFixed(2)} ${y.toFixed(2)}h0.6v${h.toFixed(2)}h-0.6Z`;
+  }
+  const W=Math.max(1,Math.ceil(peaks.length/step))+1;
+  el.innerHTML='<svg class="wv-svg" viewBox="0 0 '+W+' 100" preserveAspectRatio="none"><path d="'+d+'"/></svg>'+
+    '<div class="ew-region-layer" id="ewRegLayer"></div>'+
+    '<div class="ew-shade" id="ewBefore"></div><div class="ew-shade" id="ewAfter"></div>'+
+    '<div class="ew-sel" id="ewSel"></div>'+
+    '<div class="ew-handle" id="ewHStart" data-side="start"></div>'+
+    '<div class="ew-handle" id="ewHEnd" data-side="end"></div>';
+
+  const waveTime=ev=>{
+    const r=el.getBoundingClientRect();
+    return Math.max(0,Math.min(editState.dur,((ev.clientX-r.left)/Math.max(1,r.width))*editState.dur));
+  };
+  el.onpointerdown=ev=>{
+    if(!editState)return;
+    const t=waveTime(ev);
+    if(ev.target.classList.contains("ew-handle"))ewDrag={mode:"trim",side:ev.target.dataset.side};
+    else{ewDrag={mode:"sel",anchor:t};editState.sel={start:t,end:t};}
+    try{el.setPointerCapture(ev.pointerId);}catch(_){}
+    ev.preventDefault();
+  };
+  el.onpointermove=ev=>{
+    if(!ewDrag||!editState)return;
+    const t=waveTime(ev);
+    if(ewDrag.mode==="trim"){
+      if(ewDrag.side==="start")editState.trimStart=Math.max(0,Math.min(t,editState.trimEnd-0.02));
+      else editState.trimEnd=Math.min(editState.dur,Math.max(t,editState.trimStart+0.02));
+      updateEditorValues();
+    }else{
+      editState.sel={start:Math.min(ewDrag.anchor,t),end:Math.max(ewDrag.anchor,t)};
+      updateEditorOverlays();
+    }
+  };
+  const end=()=>{
+    if(ewDrag&&ewDrag.mode==="sel"&&editState.sel&&editState.sel.end-editState.sel.start<0.02)
+      editState.sel=null;
+    ewDrag=null;updateEditorOverlays();updateAddRegionBtn();
+  };
+  el.onpointerup=end;el.onpointercancel=end;
+  updateEditorOverlays();updateAddRegionBtn();
+}
+function updateEditorValues(){
+  if(!editState)return;
+  $("ewStart").value=editState.trimStart.toFixed(2);
+  $("ewEnd").value=editState.trimEnd.toFixed(2);
+  updateEditorOverlays();
+}
+function updateEditorOverlays(){
+  if(!editState)return;
+  const a=editorPct(editState.trimStart),b=editorPct(editState.trimEnd);
+  $("ewBefore").style.width=a+"%";
+  $("ewAfter").style.left=b+"%";$("ewAfter").style.width=(100-b)+"%";
+  $("ewHStart").style.left=a+"%";$("ewHEnd").style.left=b+"%";
+  const layer=$("ewRegLayer");
+  if(layer)layer.innerHTML=editState.regions.map(r=>{
+    const l=editorPct(r.start),w=Math.max(0,editorPct(r.end)-l);
+    return '<div class="ew-region-span" style="left:'+l+'%;width:'+w+'%"></div>';
+  }).join("");
+  const sel=$("ewSel");
+  if(editState.sel){
+    sel.style.display="block";
+    sel.style.left=editorPct(editState.sel.start)+"%";
+    sel.style.width=Math.max(0,editorPct(editState.sel.end)-editorPct(editState.sel.start))+"%";
+  }else sel.style.display="none";
+}
+function updateAddRegionBtn(){
+  const ok=editState&&editState.sel&&editState.sel.end-editState.sel.start>=0.02;
+  $("ewAddRegion").disabled=!ok;
+}
+function renderEditorRegions(){
+  const c=$("ewRegions");c.innerHTML="";
+  if(!editState||!editState.regions.length){c.innerHTML='<span class="dim">нет участков</span>';return;}
+  editState.regions.forEach((r,i)=>{
+    const row=document.createElement("div");row.className="reg-row";
+    row.innerHTML='<span class="mono">'+r.start.toFixed(2)+'–'+r.end.toFixed(2)+' с</span>'+
+      '<input type="range" min="0" max="400" step="5" value="'+Math.round(r.gain*100)+'">'+
+      '<output class="mono">'+Math.round(r.gain*100)+'%</output>'+
+      '<button class="s-ctl del" title="Удалить">✕</button>';
+    row.querySelector("input").addEventListener("input",e=>{
+      r.gain=(+e.target.value)/100;
+      row.querySelector("output").textContent=e.target.value+"%";
+    });
+    row.querySelector("button").addEventListener("click",()=>{
+      editState.regions.splice(i,1);renderEditorRegions();updateEditorOverlays();
+    });
+    c.appendChild(row);
+  });
+}
+function applyEditor(reset){
+  if(!editState)return;
+  const def=reset?{trimStart:0,trimEnd:0,gain:1,regions:[]}:{
+    trimStart:editState.trimStart,trimEnd:editState.trimEnd,gain:editState.gain,
+    regions:editState.regions.map(r=>({start:r.start,end:r.end,gain:r.gain}))
+  };
+  const id=editState.id;
+  send({cmd:"editSound",id:id,...def});
+  closeEditDialog();
+  toast(reset?"Правки сброшены":"Звук отредактирован");
+}
+$("ewClose").addEventListener("click",closeEditDialog);
+$("ewCancel").addEventListener("click",closeEditDialog);
+$("ewReset").addEventListener("click",()=>applyEditor(true));
+$("ewApply").addEventListener("click",()=>applyEditor(false));
+$("ewGain").addEventListener("input",e=>{
+  if(!editState)return;
+  editState.gain=(+e.target.value)/100;
+  $("ewGainVal").textContent=e.target.value+"%";
+});
+$("ewStart").addEventListener("change",e=>{
+  if(!editState)return;
+  editState.trimStart=Math.max(0,Math.min(+e.target.value||0,editState.trimEnd-0.02));
+  updateEditorValues();
+});
+$("ewEnd").addEventListener("change",e=>{
+  if(!editState)return;
+  const v=+e.target.value||0;
+  editState.trimEnd=Math.min(editState.dur,Math.max(v,editState.trimStart+0.02));
+  updateEditorValues();
+});
+$("ewAddRegion").addEventListener("click",()=>{
+  if(!editState||!editState.sel)return;
+  editState.regions.push({start:editState.sel.start,end:editState.sel.end,gain:1.5});
+  editState.regions.sort((a,b)=>a.start-b.start);
+  editState.sel=null;updateEditorOverlays();updateAddRegionBtn();renderEditorRegions();
+});
+
+function tagChipsHtml(s){
+  const chips=(s.tags||[]).map(t=>`<span class="tag${String(t).toLowerCase()==="hotkey"?" builtin":""}" title="${esc(t)}">${esc(t)}</span>`).join("");
+  return chips+`<button class="tag-add" data-tags title="Изменить теги" aria-label="Изменить теги">+</button>`;
+}
+
+// Shared building blocks for both views: one visual language, same controls.
+function soundMetaHtml(s){
+  return `<div class="s-meta">
+    <div class="s-name" title="${esc(s.name)}">${esc(s.name)}</div>
+    <div class="s-sub mono">${fmtSec(s.dur)}${s.loop?" · loop":""}</div>
+  </div>`;
+}
+function soundVolumeHtml(s){
+  const pct=Math.round(s.gain*100);
+  return `<div class="s-volume">
+    ${ICONS.volume}
+    <input type="range" min="0" max="200" step="5" value="${pct}" data-vol aria-label="Громкость: ${esc(s.name)}">
+    <output class="mono" data-volval>${pct}%</output>
+  </div>`;
+}
+function soundActionsHtml(s, cardMode){
+  const hk=`<button class="keycap${s.hotkey?"":" unset"}" data-hk title="Назначить хоткей" aria-label="Хоткей">${s.hotkey?esc(s.hotkey):"hotkey"}</button>`;
+  const transport=`<div class="act-group">
+      <button class="s-ctl" data-stop title="Стоп" aria-label="Стоп">${ICONS.stop}</button>
+      <button class="s-ctl${s.loop?" on":""}" data-loop title="Повтор" aria-label="Повтор" aria-pressed="${!!s.loop}">${ICONS.loop}</button>
+      <button class="s-ctl preview" data-preview title="Предпрослушать на динамики" aria-label="Предпрослушать">${ICONS.preview}</button>
+    </div>`;
+  const tools=`<button class="s-ctl" data-edit title="Редактор звука" aria-label="Редактор звука">${ICONS.edit}</button>
+      <button class="s-ctl del" data-del title="Удалить" aria-label="Удалить">${ICONS.trash}</button>`;
+  // In cards the hotkey chip fills the space between the two button groups.
+  if(cardMode)
+    return `<div class="s-actions card-actions">${transport}${hk}<div class="act-group">${tools}</div></div>`;
+  return `<div class="s-actions">${transport}<div class="act-group">${hk}${tools}</div></div>`;
+}
+function playIcon(s){return (playingIds.has(s.id)&&!pausedIds.has(s.id))?ICONS.pause:ICONS.play;}
 
 function renderSounds(){
   const grid=$("soundGrid"),list=$("soundList");
@@ -358,50 +666,26 @@ function renderSounds(){
   const filtered=getFilteredSounds();
   $("soundEmpty").classList.toggle("hidden",filtered.length>0);
   for(const s of filtered){
+    const el=document.createElement(isGrid?"article":"div");
+    el.className=(isGrid?"scard":"srow")+(playingIds.has(s.id)?" playing":"");
+    el.dataset.id=s.id;
+    const play=`<button class="play-btn" data-play title="ЛКМ — играть, ПКМ — предпрослушать" aria-label="Воспроизвести">${playIcon(s)}</button>`;
     if(isGrid){
-      const card=document.createElement("div");
-      card.className="scard"+(playingIds.has(s.id)?" playing":"");
-      card.dataset.id=s.id;
-      card.innerHTML=`
-        <div class="scard-head">
-          <button class="play-btn" data-play title="ЛКМ — играть, ПКМ — предпрослушивание">
-            ${(playingIds.has(s.id)&&!pausedIds.has(s.id))?ICONS.pause:ICONS.play}
-          </button>
-          <div class="s-name"><b>${esc(s.name)}</b><span class="mono">${fmtSec(s.dur)}</span></div>
-        </div>
+      el.innerHTML=`<div class="scard-head">${play}${soundMetaHtml(s)}</div>
+        <div class="scard-tags">${tagChipsHtml(s)}</div>
         <div class="wave-canvas" data-wave id="wave-${s.id}" title="Клик — перемотать"></div>
-        <div class="scard-ctrls">
-          <button class="s-ctl" data-stop title="Стоп">■</button>
-          <button class="s-ctl preview" data-preview title="Предпрослушивание (на динамики)">${ICONS.preview}</button>
-          <input type="range" min="0" max="200" step="5" value="${Math.round(s.gain*100)}" data-vol style="width:60px">
-          <button class="s-ctl${s.loop?" on":""}" data-loop title="Повтор">${ICONS.loop}</button>
-          <button class="keycap" data-hk>${s.hotkey?esc(s.hotkey):"hotkey"}</button>
-          <button class="s-ctl del" data-del title="Удалить">${ICONS.trash}</button>
-        </div>`;
-      drawWaveform(card.querySelector("[data-wave]"),s);
-      makeSoundControls(card,s);
-      container.appendChild(card);
-    } else {
-      const row=document.createElement("div");
-      row.className="srow"+(playingIds.has(s.id)?" playing":"");
-      row.dataset.id=s.id;
-      row.innerHTML=`
-        <button class="play-btn" data-play title="ЛКМ — играть, ПКМ — предпрослушивание">
-          ${(playingIds.has(s.id)&&!pausedIds.has(s.id))?ICONS.pause:ICONS.play}
-        </button>
-        <div class="s-name"><b>${esc(s.name)}</b><span class="mono">${fmtSec(s.dur)}${s.loop?" · loop":""}</span></div>
-        <div class="wave-canvas" data-wave id="wave-${s.id}" title="Клик — перемотать" style="flex:1;max-width:200px"></div>
-        <button class="s-ctl" data-stop title="Стоп">■</button>
-        <button class="s-ctl preview" data-preview title="Предпрослушивание (на динамики)">${ICONS.preview}</button>
-        <input type="range" class="s-vol" min="0" max="200" step="5" value="${Math.round(s.gain*100)}" data-vol>
-        <button class="s-ctl${s.loop?" on":""}" data-loop title="Повтор">${ICONS.loop}</button>
-        <button class="keycap" data-hk>${s.hotkey?esc(s.hotkey):"hotkey"}</button>
-        <button class="s-ctl del" data-del title="Удалить">${ICONS.trash}</button>`;
-      drawWaveform(row.querySelector("[data-wave]"),s);
-      makeSoundControls(row,s);
-      container.appendChild(row);
+        ${soundVolumeHtml(s)}${soundActionsHtml(s,true)}`;
+    }else{
+      el.innerHTML=`${play}${soundMetaHtml(s)}
+        <div class="srow-tags">${tagChipsHtml(s)}</div>
+        <div class="wave-canvas" data-wave id="wave-${s.id}" title="Клик — перемотать"></div>
+        ${soundVolumeHtml(s)}${soundActionsHtml(s)}`;
     }
+    drawWaveform(el.querySelector("[data-wave]"),s);
+    makeSoundControls(el,s);
+    container.appendChild(el);
   }
+  updatePreviewButtons();
 }
 
 // Search
@@ -442,7 +726,10 @@ function updatePlayingRows(){
     const id=+row.dataset.id;const on=playingIds.has(id);const paused=pausedIds.has(id);
     row.classList.toggle("playing",on&&!paused);
     const btn=row.querySelector("[data-play]");
-    if(btn)btn.innerHTML=(on&&!paused)?ICONS.pause:ICONS.play;
+    if(btn){
+      btn.innerHTML=(on&&!paused)?ICONS.pause:ICONS.play;
+      btn.setAttribute("aria-label",(on&&!paused)?"Пауза":"Воспроизвести");
+    }
   });
 }
 
@@ -481,6 +768,11 @@ function renderSettings(){
   if(document.activeElement!==$("monitorChk"))$("monitorChk").checked=d.curMonitor>=0;
   $("bypassChk").checked=S.bypassOn;$("duckingChk").checked=S.duckingOn;
   if(S.latencyMode!==undefined)$("latencyMode").value=String(S.latencyMode);
+  if(document.activeElement!==$("autoStartChk"))$("autoStartChk").checked=!!S.autoStart;
+  if(document.activeElement!==$("runAdminChk"))$("runAdminChk").checked=!!S.runAsAdmin;
+  $("runNote").textContent=S.elevated
+    ? "Приложение сейчас запущено от имени администратора."
+    : "При включении «от имени админа» приложение перезапустится с запросом UAC. Настройка действует при каждом запуске.";
   $("hkVoice").textContent=S.hotkeys.voice||"— клик —";
   $("hkAi").textContent=S.hotkeys.ai||"— клик —";
   $("routeNote").textContent=d.running?`${d.capture[d.curCapture]?.name||"?"} → ${d.playback[d.curPlayback]?.name||"?"}`:"не запущено";
@@ -543,7 +835,6 @@ $("emptyAddBtn").addEventListener("click",()=>send({cmd:"addFileDialog"}));
 $("refreshSoundsBtn").addEventListener("click",()=>{
   send({cmd:"refreshSounds"});toast("Обновляю библиотеку из data\\sounds…");
 });
-$("stopPreviewBtn").addEventListener("click",stopPreviewNow);
 $("stopAllBtn").addEventListener("click",()=>send({cmd:"stopall"}));
 
 // AI
@@ -610,6 +901,8 @@ $("applyRoute").addEventListener("click",()=>{send({cmd:"select",cap:+$("capSele
   toast("Маршрут применён");settingsRenderedOnce=false;});
 $("bypassChk").addEventListener("change",e=>send({cmd:"bypassOn",on:e.target.checked}));
 $("duckingChk").addEventListener("change",e=>send({cmd:"duckingOn",on:e.target.checked}));
+$("autoStartChk").addEventListener("change",e=>send({cmd:"autoStart",on:e.target.checked}));
+$("runAdminChk").addEventListener("change",e=>send({cmd:"runAsAdmin",on:e.target.checked}));
 $("hkVoice").addEventListener("click",()=>startHkCapture({target:"voice"}));
 $("hkAi").addEventListener("click",()=>startHkCapture({target:"ai"}));
 $("hkStopAll").addEventListener("click",()=>startHkCapture({target:"stopall"}));
@@ -651,7 +944,9 @@ $("hkCancel").addEventListener("click",endHkCapture);
 document.addEventListener("keydown",e=>{
   if(!hkTarget){
     if(e.key==="Escape"){
-      if(!$("presetEditor").classList.contains("hidden"))closePresetEditor();
+      if(!$("editOverlay").classList.contains("hidden"))closeEditDialog();
+      else if(!$("tagOverlay").classList.contains("hidden"))closeTagEditor();
+      else if(!$("presetEditor").classList.contains("hidden"))closePresetEditor();
       else if(!$("confirmOverlay").classList.contains("hidden"))$("confirmNo").click();
       else if(!$("convertOverlay").classList.contains("hidden")){
         $("convertOverlay").classList.add("hidden");pthCandidate=null;}

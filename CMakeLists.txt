@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(VoiceDeck LANGUAGES C CXX)
+project(VoiceDeck VERSION 1.2.0 LANGUAGES C CXX)
 
 message(STATUS "VoiceDeck - Stage 1: Soundpad + VB-CABLE (Windows only)")
 
@@ -48,6 +48,8 @@ add_executable(voicedeck
     src/core/soundboard/VoiceMixer.cpp
     src/core/settings/Settings.cpp
     src/core/platform/HotkeyManager.cpp
+    src/core/platform/AutoStart.cpp
+    src/core/platform/Elevation.cpp
     third_party/miniaudio/miniaudio.c
 )
 

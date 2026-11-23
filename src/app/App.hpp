@@ -49,6 +49,30 @@ struct App {
     void setSoundVolume(std::uint64_t id, int pct);
     void setSoundLoop(std::uint64_t id, bool on);
 
+    // --- tags ---------------------------------------------------------------
+    // `tags` is a JSON array of strings. Persists to sounds.json immediately.
+    std::string setSoundTags(std::uint64_t id, const nlohmann::json& tags);
+    std::string addSoundTag(std::uint64_t id, const std::string& tag);
+    std::string removeSoundTag(std::uint64_t id, const std::string& tag);
+    // Binds/clears a sound hotkey and keeps the built-in "hotkey" tag in sync.
+    std::string bindSoundHotkey(std::uint64_t id, const std::string& combo);
+
+    // --- in-app audio editor -------------------------------------------------
+    // def: {"trimStart":s,"trimEnd":s,"gain":float,"regions":[{"start","end","gain"}]}.
+    // Stops the clip first (refuses while it is still playing), then rebuilds
+    // the PCM from the pristine source and saves the metadata to sounds.json.
+    std::string editSound(std::uint64_t id, const nlohmann::json& def);
+
+    // --- Windows integration -------------------------------------------------
+    bool autoStartEnabled() const;
+    std::string setAutoStart(bool on);
+    // Returns "" on success. Sets `relaunching` when an elevated copy was
+    // spawned (the caller should then exit this process).
+    std::string setRunAsAdmin(bool on, bool& relaunching);
+    // Call at startup before init(). Returns true when an elevated copy was
+    // launched and this process should exit immediately.
+    bool maybeElevate(const std::string& args);
+
     // --- DSP characters -------------------------------------------------------
     bool applyPreset(int idx); // false when out of range
     void setDsp(bool on);
@@ -113,6 +137,8 @@ struct App {
     std::filesystem::path settingsFile;
     std::filesystem::path soundsFile;
     std::filesystem::path charactersFile;
+    // Set by main() so the elevation relaunch preserves CLI/GUI mode.
+    bool cliMode = false;
     std::vector<VoicePreset> presets;
     bool bypassOn = true;
     bool duckingOn = false;
