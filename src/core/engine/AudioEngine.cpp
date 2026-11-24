@@ -1,5 +1,6 @@
 #include "core/engine/AudioEngine.hpp"
 #include "core/settings/Settings.hpp"
+#include "core/util/Log.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -90,17 +91,39 @@ bool AudioEngine::start(std::size_t captureIdx, std::size_t playbackIdx, std::st
     activeCaptureId_ = captureDevices_[captureIdx].id;
     activePlaybackId_ = playbackDevices_[playbackIdx].id;
 
+    // Shared-mode low latency: miniaudio uses IAudioClient3 when the driver
+    // supports it, clamps the period to the engine's fundamental period and
+    // falls back to IAudioClient automatically. Requesting a period is only a
+    // hint - the actual values are read back below and exposed to the UI.
     ma_device_config capCfg = ma_device_config_init(ma_device_type_capture);
     capCfg.capture.format = ma_format_f32;
     capCfg.capture.channels = kChannels;
     capCfg.capture.pDeviceID = &activeCaptureId_;
     capCfg.sampleRate = kSampleRate;
     capCfg.periodSizeInFrames = currentPeriodFrames();
+    capCfg.performanceProfile = ma_performance_profile_low_latency;
+    capCfg.wasapi.usage = ma_wasapi_usage_pro_audio; // MMCSS "Pro Audio" thread
     capCfg.dataCallback = &AudioEngine::captureDataCb;
     capCfg.pUserData = this;
     if (ma_device_init(&ctx_, &capCfg, &capDev_) != MA_SUCCESS) {
         err = "failed to open capture device: " + captureDevices_[captureIdx].name;
         return false;
+    }
+    {
+        const auto& c = capDev_.capture;
+        capPeriodFrames_.store(c.internalPeriodSizeInFrames, std::memory_order_relaxed);
+        capBufferFrames_.store(
+            capDev_.wasapi.actualBufferSizeInFramesCapture > 0
+                ? capDev_.wasapi.actualBufferSizeInFramesCapture
+                : c.internalPeriodSizeInFrames * std::max<ma_uint32>(1, c.internalPeriods),
+            std::memory_order_relaxed);
+        capSampleRate_.store(c.internalSampleRate, std::memory_order_relaxed);
+        log::info("capture: '%s' %u Hz, %u ch, fmt %d, period %u frames (%.2f ms), "
+                  "buffer %u frames, shared=%d",
+                  c.name, c.internalSampleRate, c.internalChannels, int(c.internalFormat),
+                  c.internalPeriodSizeInFrames,
+                  1000.0 * double(c.internalPeriodSizeInFrames) / double(c.internalSampleRate),
+                  capDev_.wasapi.actualBufferSizeInFramesCapture, int(c.shareMode));
     }
 
     ma_device_config playCfg = ma_device_config_init(ma_device_type_playback);
@@ -109,12 +132,30 @@ bool AudioEngine::start(std::size_t captureIdx, std::size_t playbackIdx, std::st
     playCfg.playback.pDeviceID = &activePlaybackId_;
     playCfg.sampleRate = kSampleRate;
     playCfg.periodSizeInFrames = currentPeriodFrames();
+    playCfg.performanceProfile = ma_performance_profile_low_latency;
+    playCfg.wasapi.usage = ma_wasapi_usage_pro_audio; // MMCSS "Pro Audio" thread
     playCfg.dataCallback = &AudioEngine::playbackDataCb;
     playCfg.pUserData = this;
     if (ma_device_init(&ctx_, &playCfg, &playDev_) != MA_SUCCESS) {
         err = "failed to open playback device: " + playbackDevices_[playbackIdx].name;
         ma_device_uninit(&capDev_);
         return false;
+    }
+    {
+        const auto& p = playDev_.playback;
+        playPeriodFrames_.store(p.internalPeriodSizeInFrames, std::memory_order_relaxed);
+        playBufferFrames_.store(
+            playDev_.wasapi.actualBufferSizeInFramesPlayback > 0
+                ? playDev_.wasapi.actualBufferSizeInFramesPlayback
+                : p.internalPeriodSizeInFrames * std::max<ma_uint32>(1, p.internalPeriods),
+            std::memory_order_relaxed);
+        playSampleRate_.store(p.internalSampleRate, std::memory_order_relaxed);
+        log::info("playback: '%s' %u Hz, %u ch, fmt %d, period %u frames (%.2f ms), "
+                  "buffer %u frames, shared=%d",
+                  p.name, p.internalSampleRate, p.internalChannels, int(p.internalFormat),
+                  p.internalPeriodSizeInFrames,
+                  1000.0 * double(p.internalPeriodSizeInFrames) / double(p.internalSampleRate),
+                  playDev_.wasapi.actualBufferSizeInFramesPlayback, int(p.shareMode));
     }
 
     micRing_.reset();
@@ -152,6 +193,12 @@ void AudioEngine::stopDevices() {
     }
     curCaptureIdx_ = std::size_t(-1);
     curPlaybackIdx_ = std::size_t(-1);
+    capPeriodFrames_.store(0, std::memory_order_relaxed);
+    playPeriodFrames_.store(0, std::memory_order_relaxed);
+    capBufferFrames_.store(0, std::memory_order_relaxed);
+    playBufferFrames_.store(0, std::memory_order_relaxed);
+    capSampleRate_.store(0, std::memory_order_relaxed);
+    playSampleRate_.store(0, std::memory_order_relaxed);
 }
 
 bool AudioEngine::startMonitor(std::size_t playbackIdx, std::string& err) {
@@ -172,6 +219,8 @@ bool AudioEngine::startMonitor(std::size_t playbackIdx, std::string& err) {
     cfg.playback.pDeviceID = &activeMonitorId_;
     cfg.sampleRate = kSampleRate;
     cfg.periodSizeInFrames = currentPeriodFrames();
+    cfg.performanceProfile = ma_performance_profile_low_latency;
+    cfg.wasapi.usage = ma_wasapi_usage_pro_audio;
     cfg.dataCallback = &AudioEngine::monitorDataCb;
     cfg.pUserData = this;
     if (ma_device_init(&ctx_, &cfg, &monDev_) != MA_SUCCESS) {
@@ -229,6 +278,22 @@ std::string AudioEngine::currentCaptureName() const {
 std::string AudioEngine::currentPlaybackName() const {
     if (curPlaybackIdx_ == std::size_t(-1) || curPlaybackIdx_ >= playbackDevices_.size()) return "-";
     return playbackDevices_[curPlaybackIdx_].name;
+}
+
+double AudioEngine::endToEndLatencyMs() const {
+    if (!isRunning()) return 0.0;
+    const double rate = double(kSampleRate);
+    // Capture buffer + playback buffer + smoothed mic-ring backlog.
+    double ms = (double(capBufferFrames_.load(std::memory_order_relaxed)) +
+                 double(playBufferFrames_.load(std::memory_order_relaxed)) +
+                 micPath_.averageFillFrames()) *
+                1000.0 / rate;
+    // The character chain (and AI, when active) sits between capture and mix.
+    if (bypassEnabled() && dspOn()) {
+        ms += double(voiceLatencyMs());
+        if (aiEnabled() && aiService_.isReady()) ms += aiLatencyMs();
+    }
+    return ms;
 }
 
 // --------------------------------------------------------------------------

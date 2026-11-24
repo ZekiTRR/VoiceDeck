@@ -133,6 +133,7 @@ private:
     ICoreWebView2* web_ = nullptr;
     EventRegistrationToken msgToken_{};
     EventRegistrationToken navToken_{};
+    bool metersPaused_ = false; // minimized: no 15 Hz WebView2 traffic
 
     // Cross-thread message queue (workers -> UI thread).
     std::mutex pendingMtx_;
@@ -476,7 +477,7 @@ void UiApp::pushState() {
 }
 
 void UiApp::pushMeters() {
-    if (!web_) return;
+    if (!web_ || metersPaused_) return;
     const std::wstring w = utf8ToUtf16(app_.metersJson().dump());
     PWSTR json = static_cast<PWSTR>(CoTaskMemAlloc(sizeof(wchar_t) * (w.size() + 1)));
     if (!json) return;
@@ -1176,6 +1177,16 @@ LRESULT UiApp::wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 RECT rc{};
                 GetClientRect(hwnd, &rc);
                 controller_->put_Bounds(rc);
+            }
+            // Minimized: stop the 15 Hz meters/state traffic to WebView2.
+            if (wp == SIZE_MINIMIZED) {
+                if (!metersPaused_) {
+                    KillTimer(hwnd, kTimerMeters);
+                    metersPaused_ = true;
+                }
+            } else if (metersPaused_) {
+                SetTimer(hwnd, kTimerMeters, 66, nullptr);
+                metersPaused_ = false;
             }
             return 0;
         }

@@ -3,6 +3,7 @@
 #include "core/engine/SpscQueue.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstring>
 #include <vector>
@@ -28,12 +29,15 @@ public:
     void reset() {
         staged_ = 0;
         pos_ = 0.0;
-        avgFill_ = 0.0;
+        avgFill_.store(0.0, std::memory_order_relaxed);
         step_ = 1.0;
     }
 
     // Produces up to `frames` frames into dst; returns the count produced
     // (less than requested on underrun - callers fill the rest with silence).
+    // Control/UI threads: smoothed backlog (ring + staging) in frames.
+    double averageFillFrames() const { return avgFill_.load(std::memory_order_relaxed); }
+
     std::size_t pull(RingBuffer& src, float* dst, std::size_t frames) {
         // Top up staging from the ring.
         const std::size_t stageFrames = stage_.size() / kChannels;
@@ -46,8 +50,10 @@ public:
         // Slow control loop: keep total backlog near target. If we consume
         // too fast (backlog falling) step_ drops below 1; too slow -> above 1.
         const double fill = double(src.available() / kChannels + staged_);
-        avgFill_ += (fill - avgFill_) * 0.05;
-        const double err = (avgFill_ - targetFrames_) / targetFrames_;
+        const double avg = avgFill_.load(std::memory_order_relaxed);
+        const double nextAvg = avg + (fill - avg) * 0.05;
+        avgFill_.store(nextAvg, std::memory_order_relaxed);
+        const double err = (nextAvg - targetFrames_) / targetFrames_;
         const double clamped = std::max(-1.5, std::min(1.5, err));
         step_ = std::max(0.998, std::min(1.002, 1.0 + clamped * 0.001));
 
@@ -83,7 +89,7 @@ private:
     std::vector<float> stage_;
     std::size_t staged_ = 0;
     double pos_ = 0.0;
-    double avgFill_ = 0.0;
+    std::atomic<double> avgFill_{0.0}; // read by the UI for the latency estimate
     double step_ = 1.0;
     double targetFrames_ = 1.0;
 };

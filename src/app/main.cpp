@@ -146,10 +146,12 @@ void printDevices(App& app) {
 
 void printStatus(App& app) {
     if (app.engine.isRunning())
-        vd::log::info("engine    : RUNNING  '%s' -> '%s'  (%u frames/block, %u Hz, %u ch)",
+        vd::log::info("engine    : RUNNING  '%s' -> '%s'  (%u cap / %u play frames, %u Hz, %u ch)",
                       app.engine.currentCaptureName().c_str(),
-                      app.engine.currentPlaybackName().c_str(), app.engine.currentPeriodFrames(),
-                      vd::AudioEngine::kSampleRate, vd::AudioEngine::kChannels);
+                      app.engine.currentPlaybackName().c_str(),
+                      app.engine.actualCapturePeriodFrames(),
+                      app.engine.actualPlaybackPeriodFrames(), vd::AudioEngine::kSampleRate,
+                      vd::AudioEngine::kChannels);
     else
         vd::log::info("engine    : stopped (run 'devices' and 'select cN pN')");
     vd::log::info("mic level : [%s] %.3f", levelBar(app.engine.micLevel()).c_str(),
@@ -158,9 +160,9 @@ void printStatus(App& app) {
     const char* pName = (pIdx >= 0 && std::size_t(pIdx) < app.presets.size())
                             ? app.presets[std::size_t(pIdx)].name.c_str()
                             : "?";
-    vd::log::info("voice     : DSP %s, preset '%s', chain latency ~%.0f ms",
+    vd::log::info("voice     : DSP %s, preset '%s', chain ~%.0f ms, end-to-end ~%.0f ms",
                   app.engine.dspOn() ? "ON" : "OFF", pName,
-                  double(app.engine.voiceLatencyMs()));
+                  double(app.engine.voiceLatencyMs()), app.engine.endToEndLatencyMs());
     {
         auto& svc = app.engine.aiService();
         std::string aiLine = app.engine.aiEnabled() ? "ON" : "OFF";

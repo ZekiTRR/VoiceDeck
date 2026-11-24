@@ -37,7 +37,7 @@ bool Settings::load(const std::filesystem::path& file) {
         aiFadeMs = j.value("aiFadeMs", 30);
         aiAutoLimit = j.value("aiAutoLimit", true);
         aiFlapLimit = j.value("aiFlapLimit", 8);
-        latencyMode = j.value("latencyMode", 1);
+        latencyMode = j.value("latencyMode", 0);
         runAsAdmin = j.value("runAsAdmin", false);
         voiceHotkey = j.value("voiceHotkey", "");
         aiHotkey = j.value("aiHotkey", "");

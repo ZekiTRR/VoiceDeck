@@ -22,9 +22,9 @@ struct Settings {
     bool aiAutoLimit = true;         // auto-disable on audible dropouts
     int aiFlapLimit = 8;             // ...after N dropouts per 30 s
 
-    // Latency mode: 0 = low (~5ms WASAPI + 20ms Stretch), 1 = normal (~10ms + 40ms),
-    // 2 = high quality (~20ms + 53ms). Trade CPU load for delay.
-    int latencyMode = 1;
+    // Latency mode: 0 = low (256 frames + 20ms Stretch), 1 = normal (480 + 40ms),
+    // 2 = high quality (960 + 53ms). Trade CPU load for delay.
+    int latencyMode = 0;
 
     // Windows integration. `runAsAdmin` relaunches the app through UAC on
     // startup; `autoStart` lives in HKCU\...\Run (see AutoStart.hpp).

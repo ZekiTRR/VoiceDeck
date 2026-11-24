@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <vector>
 
 namespace vd {
 
@@ -129,9 +130,38 @@ std::string RvcRuntime::makeSessionOptionsFor(AiProvider p, void** optionsOut) {
     } else if (p == AiProvider::Cuda || p == AiProvider::Dml) {
         err = "provider not available in this onnxruntime build";
     } else {
-        SYSTEM_INFO si{};
-        GetSystemInfo(&si);
-        lib.api->SetIntraOpNumThreads(opts, std::max<DWORD>(1, si.dwNumberOfProcessors / 2));
+        // CPU inference must not spin up one thread per logical core: ORT's
+        // thread pool would compete with games and the audio callback. Use at
+        // most half of the PHYSICAL cores (capped at 4) and sequential
+        // execution to avoid inter-op sync overhead.
+        unsigned physical = 0;
+        DWORD len = 0;
+        GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len);
+        if (GetLastError() == ERROR_INSUFFICIENT_BUFFER && len > 0) {
+            std::vector<unsigned char> buf(len);
+            if (GetLogicalProcessorInformationEx(
+                    RelationProcessorCore,
+                    reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data()), &len)) {
+                for (DWORD off = 0; off < len;) {
+                    auto* info = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(
+                        buf.data() + off);
+                    if (info->Relationship == RelationProcessorCore) ++physical;
+                    if (info->Size == 0) break;
+                    off += info->Size;
+                }
+            }
+        }
+        if (physical == 0) {
+            SYSTEM_INFO si{};
+            GetSystemInfo(&si);
+            physical = std::max<DWORD>(1, si.dwNumberOfProcessors / 2);
+        }
+        const int threads = int(std::max<unsigned>(1, std::min<unsigned>(4, physical / 2)));
+        lib.api->SetIntraOpNumThreads(opts, threads);
+        lib.api->SetInterOpNumThreads(opts, 1);
+        lib.api->SetSessionExecutionMode(opts, ORT_SEQUENTIAL);
+        log::info("AI CPU inference: %d intra-op thread(s), sequential mode (%u physical cores)",
+                  threads, physical);
     }
     if (!err.empty()) {
         lib.api->ReleaseSessionOptions(opts);

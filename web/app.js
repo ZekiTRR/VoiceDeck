@@ -782,7 +782,7 @@ function renderSettings(){
 const LED_N=22;
 function buildLed(){const led=$("micLed");for(let i=0;i<LED_N;i++)led.appendChild(document.createElement("i"));}
 function renderMeters(m){
-  if(!S)return;
+  if(!S||document.hidden)return;
   setSwitch($("powerBtn"),m.dspOn&&m.bypassOn);setSwitch($("aiPowerBtn"),m.aiOn);
   const lit=Math.round(Math.sqrt(Math.min(1,m.mic*6))*LED_N);
   const segs=$("micLed").children;
@@ -794,7 +794,9 @@ function renderMeters(m){
     if(typeof p==="object"&&p.paused)pausedIds.add(id);
     updateWaveProgress(id,typeof p==="object"?(p.pos||0):0);}
   updatePlayingRows();updateTopLive();
-  $("latInfo").textContent="DSP "+(m.dspOn?Math.round(m.voiceLatency)+"ms":"off")+(m.aiOn?" · AI "+Math.round(m.aiLatency)+"ms":"");
+  $("latInfo").textContent="Тракт "+(m.e2eLatency!=null?Math.round(m.e2eLatency):"—")+" мс"
+    +(m.dspOn?" · DSP "+Math.round(m.voiceLatency):" · DSP off")
+    +(m.aiOn?" · AI "+Math.round(m.aiLatency):"");
   $("glitchInfo").textContent="ur "+m.micUnderruns;
 }
 

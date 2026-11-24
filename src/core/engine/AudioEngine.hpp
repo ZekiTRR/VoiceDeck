@@ -51,8 +51,9 @@ public:
     static constexpr std::uint32_t kSampleRate = 48000;
     static constexpr std::uint32_t kChannels = 2;
     // Latency presets: (periodFrames, stretchBlock, stretchInterval).
-    static constexpr std::uint32_t kPeriodFrames[3] = {240, 480, 960};
-    static constexpr std::uint32_t kPeriodFramesDefault = 480; // 10 ms
+    // 256 frames @ 48 kHz = 5.33 ms (low), 480 = 10 ms, 960 = 20 ms.
+    static constexpr std::uint32_t kPeriodFrames[3] = {256, 480, 960};
+    static constexpr std::uint32_t kPeriodFramesDefault = 256; // low-latency by default
     static constexpr int kStretchBlock[3] = {768, 1536, 2048};
     static constexpr int kStretchInterval[3] = {192, 384, 512};
     static constexpr std::size_t kMaxBlockFrames = 2048;
@@ -103,6 +104,24 @@ public:
     bool dspOn() const { return dspOn_.load(std::memory_order_relaxed); }
     int voicePresetIndex() const { return voice_.activePresetIndex(); }
     float voiceLatencyMs() const { return voice_.latencyMs(); }
+    // Honest estimate of the whole mic -> virtual-cable path: device periods,
+    // average mic-ring backlog, the character chain and (when active) AI.
+    // It is computed from the negotiated device parameters, not just the DSP
+    // block, so the UI can show the real number for pitch/formant presets.
+    double endToEndLatencyMs() const;
+    // Actual parameters negotiated by miniaudio/WASAPI (0 before start()).
+    std::uint32_t actualCapturePeriodFrames() const {
+        return capPeriodFrames_.load(std::memory_order_relaxed);
+    }
+    std::uint32_t actualPlaybackPeriodFrames() const {
+        return playPeriodFrames_.load(std::memory_order_relaxed);
+    }
+    std::uint32_t actualCaptureSampleRate() const {
+        return capSampleRate_.load(std::memory_order_relaxed);
+    }
+    std::uint32_t actualPlaybackSampleRate() const {
+        return playSampleRate_.load(std::memory_order_relaxed);
+    }
 
     // AI voice (Stage 2b). The library/service are used from control threads
     // (blocking model loads); the stage itself runs its own worker.
@@ -179,7 +198,7 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> monitorActive_{false};
     std::atomic<bool> bypass_{true};
-    std::atomic<int> latencyMode_{1};
+    std::atomic<int> latencyMode_{0};
     std::atomic<bool> ducking_{false};
     std::atomic<bool> dspOn_{true};
     std::atomic<float> micLevel_{0.0f};
@@ -188,6 +207,13 @@ private:
     std::atomic<std::uint64_t> monUnderruns_{0};
     std::atomic<std::uint64_t> monOverflows_{0};
     std::atomic<std::uint64_t> playTicks_{0};
+    // Negotiated device parameters (set in start(), read by the UI/CLI).
+    std::atomic<std::uint32_t> capPeriodFrames_{0};
+    std::atomic<std::uint32_t> playPeriodFrames_{0};
+    std::atomic<std::uint32_t> capBufferFrames_{0};
+    std::atomic<std::uint32_t> playBufferFrames_{0};
+    std::atomic<std::uint32_t> capSampleRate_{0};
+    std::atomic<std::uint32_t> playSampleRate_{0};
 
     // Preview mixer: sounds played only to the original output (monitor).
     VoiceMixer previewMixer_;

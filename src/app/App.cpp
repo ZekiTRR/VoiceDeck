@@ -123,6 +123,10 @@ void App::init() {
         log::info("sound library: %zu clip(s) loaded", bank.snapshot().size());
     soundCombos_ = soundCombos; // restored by startHotkeyService()
 
+    // The device period is chosen at start(), so apply the persisted mode
+    // BEFORE opening the devices.
+    engine.setLatencyMode(settings.latencyMode);
+
     // Pick devices: saved names first, then auto (virtual cable).
     std::size_t capIdx = SIZE_MAX;
     std::size_t playIdx = SIZE_MAX;
@@ -165,8 +169,6 @@ void App::init() {
             log::warn("failed to start audio: %s - pick devices manually", err.c_str());
         }
     }
-
-engine.setLatencyMode(settings.latencyMode);
 
     // Initial engine state.
     {
@@ -970,7 +972,7 @@ std::pair<std::size_t, std::size_t> App::refreshSounds() {
 }
 
 std::string App::setLatencyMode(int mode) {
-    if (mode < 0 || mode > 2) mode = 1;
+    if (mode < 0 || mode > 2) mode = 0;
     engine.setLatencyMode(mode);
     settings.latencyMode = mode;
     settings.save(settingsFile);
@@ -1070,6 +1072,7 @@ nlohmann::json App::metersJson() const {
     j["bypassOn"] = engine.bypassEnabled();
     j["preset"] = engine.voicePresetIndex();
     j["voiceLatency"] = engine.voiceLatencyMs();
+    j["e2eLatency"] = engine.endToEndLatencyMs();
     j["micUnderruns"] = double(engine.micUnderruns());
     j["aiOn"] = engine.aiEnabled();
     j["aiReady"] = engine.aiService().isReady();
@@ -1232,8 +1235,13 @@ nlohmann::json App::statusJson() const {
 
     j["mic"] = engine.micLevel();
     j["voiceLatency"] = engine.voiceLatencyMs();
-j["micUnderruns"] = double(engine.micUnderruns());
+    j["e2eLatency"] = engine.endToEndLatencyMs();
+    j["micUnderruns"] = double(engine.micUnderruns());
     j["latencyMode"] = engine.latencyMode();
+    j["capturePeriod"] = engine.actualCapturePeriodFrames();
+    j["playbackPeriod"] = engine.actualPlaybackPeriodFrames();
+    j["captureRate"] = engine.actualCaptureSampleRate();
+    j["playbackRate"] = engine.actualPlaybackSampleRate();
     j["hotkeys"] = {{"voice", hotkeys.voiceToggleCombo()}, {"ai", hotkeys.aiToggleCombo()}};
     nlohmann::json allTags = nlohmann::json::array();
     for (const std::string& t : bank.allTags()) allTags.push_back(t);
