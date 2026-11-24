@@ -56,6 +56,8 @@ A voice is a `name.onnx` + `name.json` pair (Voice CTX format 1) in `data\AiVoic
 - **"Where to get voices?"** opens the official Voice CTX model pack (base models + two English VCTK voices).
 - **"Import voice"** adds an existing `.onnx` + `.json` pair.
 - **"Convert .pth"** converts an RVC v2 checkpoint inside the app. Checkpoints are loaded with `torch.load(weights_only=True)` — no code from the file is executed. The first run creates an isolated Python environment in `data\aivoice\venv` (Python 3.10–3.12 and internet required).
+- **Format 2** — new conversions use the low-latency 50 ms block / 400 ms context / 10 ms crossfade layout (`format: 2`, ~80 ms AI with a 20 ms margin). Existing v1 models (100/600/40) keep working without re-conversion.
+- **FP16 (optional)** — a checkbox during conversion produces a roughly half-size GPU model. If FP16 conversion or loading fails, the converter/app stay on FP32.
 
 For Russian or other languages you need a voice trained on that language — VCTK is English only.
 

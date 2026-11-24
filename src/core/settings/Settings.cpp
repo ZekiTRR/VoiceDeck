@@ -34,7 +34,7 @@ bool Settings::load(const std::filesystem::path& file) {
         bypass = j.value("bypass", true);
         ducking = j.value("ducking", false);
         aiProvider = j.value("aiProvider", "auto");
-        aiPrimeMarginMs = j.value("aiPrimeMarginMs", 100);
+        aiPrimeMarginMs = j.value("aiPrimeMarginMs", 20);
         aiFadeMs = j.value("aiFadeMs", 30);
         aiAutoLimit = j.value("aiAutoLimit", true);
         aiFlapLimit = j.value("aiFlapLimit", 8);

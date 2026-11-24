@@ -14,11 +14,12 @@ from pathlib import Path
 
 def main() -> int:
     if len(sys.argv) < 6:
-        print("usage: voicedeck_convert.py <data_dir> <pth> <name> <gender> <pitch>", flush=True)
+        print("usage: voicedeck_convert.py <data_dir> <pth> <name> <gender> <pitch> [fp16]", flush=True)
         return 2
     data = Path(sys.argv[1])
     pth = Path(sys.argv[2])
     name, gender, pitch = sys.argv[3], sys.argv[4], sys.argv[5]
+    fp16 = len(sys.argv) >= 7 and sys.argv[6] in ("1", "true", "fp16")
     tools = Path(__file__).resolve().parent
     ai = data / "aivoice"
     ai.mkdir(parents=True, exist_ok=True)
@@ -29,7 +30,7 @@ def main() -> int:
         print("VD:creating Python environment", flush=True)
         venv.create(venv_dir, with_pip=True)
 
-    marker = ai / ".deps_ok"
+    marker = ai / ".deps_ok_v2"
     if not marker.exists():
         print("VD:installing converter dependencies (first run, may take several minutes)", flush=True)
         try:
@@ -42,8 +43,11 @@ def main() -> int:
     print("VD:converting (.pth loaded weights-only; RVC v2 + pitch guidance only)", flush=True)
     cmd = [str(py), str(tools / "convert_voice.py"), str(pth),
            "--name", name, "--gender", gender, "--pitch-shift", str(pitch),
+           "--format", "2",
            "--out", str(data / "AiVoice" / "voices"),
            "--cache", str(ai / "cache")]
+    if fp16:
+        cmd.append("--fp16")
     try:
         code = subprocess.call(cmd)
     except Exception as exc:

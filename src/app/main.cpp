@@ -724,7 +724,9 @@ bool handleCommand(App& app, const std::string& raw, bool& quit) {
             return true;
         }
         app.setAi(on);
-        vd::log::info("AI voice: %s", on ? "ON" : "OFF");
+        app.engine.drainCommands();
+        vd::log::info("AI voice: %s (engine=%d)", on ? "ON" : "OFF",
+                      app.engine.aiEnabled() ? 1 : 0);
         return true;
     }
 

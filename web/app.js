@@ -750,7 +750,7 @@ function renderAi(){
     const active=S.ai.voice===v.name&&S.ai.ready;
     row.className="vrow"+(active?" active":"");
     row.innerHTML=(v.gender==="female"?presetIcon("female"):presetIcon("male"))+
-      `<div class="v-info"><b>${esc(v.name)}</b><span>${v.pitch?(v.pitch>0?"+":"")+v.pitch+"s":""}</span></div>`+
+      `<div class="v-info"><b>${esc(v.name)}</b><span>${v.pitch?(v.pitch>0?"+":"")+v.pitch+"s":""}${v.precision==="fp16"?" · FP16":""}</span></div>`+
       `<span class="v-load">${active?"загружен":"клик"}</span>`;
     row.addEventListener("click",()=>{send({cmd:"aivoice",name:v.name});toast("Загружаю…");});
     list.appendChild(row);
@@ -883,6 +883,7 @@ function openConvertDialog(m){
   $("cvName").value=m.name||"";
   $("cvGender").value="other";
   $("cvPitch").value=0;$("cvPitchVal").textContent="0";
+  $("cvFp16").checked=false;
   $("convertOverlay").classList.remove("hidden");
 }
 $("aiConvertPthBtn").addEventListener("click",()=>send({cmd:"aivoiceConvertPth"}));
@@ -896,7 +897,8 @@ $("cvGo").addEventListener("click",()=>{
   if(!pthCandidate)return;
   const name=($("cvName").value||"").trim()||"My voice";
   send({cmd:"convertPth",path:pthCandidate,name:name,
-        gender:$("cvGender").value,pitch:+$("cvPitch").value});
+        gender:$("cvGender").value,pitch:+$("cvPitch").value,
+        fp16:$("cvFp16").checked});
   $("convertOverlay").classList.add("hidden");pthCandidate=null;
   toast("Конвертация запущена — это может занять несколько минут");
 });

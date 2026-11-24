@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <iterator>
 #include <mutex>
 #include <string>
@@ -115,6 +116,8 @@ private:
     void pushState();
     void pushMeters();
     void requestExit();
+    void suspendWebView();
+    void resumeWebView();
 
 public:
     // Used by the free runUi() entry point.
@@ -134,6 +137,7 @@ private:
     EventRegistrationToken msgToken_{};
     EventRegistrationToken navToken_{};
     bool metersPaused_ = false; // minimized: no 15 Hz WebView2 traffic
+    bool suspendRequested_ = false; // TrySuspend issued; Resume on restore
 
     // Cross-thread message queue (workers -> UI thread).
     std::mutex pendingMtx_;
@@ -192,6 +196,20 @@ public:
 
 private:
     UiApp* owner_;
+};
+
+class SuspendCompletedHandler final
+    : public ComHandler<ICoreWebView2TrySuspendCompletedHandler> {
+public:
+    STDMETHODIMP Invoke(HRESULT errorCode, BOOL result) override {
+        if (FAILED(errorCode) || !result)
+            log::warn("WebView2 TrySuspend rejected (0x%08lX, result=%d) - "
+                      "keeping the window alive with meters paused",
+                      errorCode, int(result));
+        else
+            log::info("WebView2 suspended while minimized");
+        return S_OK;
+    }
 };
 
 class NavigationCompletedHandler final
@@ -490,6 +508,29 @@ void UiApp::requestExit() {
     if (hwnd_) PostMessageW(hwnd_, WM_CLOSE, 0, 0);
 }
 
+void UiApp::suspendWebView() {
+    if (!web_ || suspendRequested_) return;
+    ICoreWebView2_3* w3 = nullptr;
+    if (FAILED(web_->QueryInterface(IID_PPV_ARGS(&w3))) || !w3) return;
+    suspendRequested_ = true;
+    const HRESULT hr = w3->TrySuspend(new SuspendCompletedHandler());
+    if (FAILED(hr)) {
+        suspendRequested_ = false;
+        log::warn("TrySuspend call failed (0x%08lX) - WebView2 stays active", hr);
+    }
+    w3->Release();
+}
+
+void UiApp::resumeWebView() {
+    if (!web_ || !suspendRequested_) return;
+    ICoreWebView2_3* w3 = nullptr;
+    if (SUCCEEDED(web_->QueryInterface(IID_PPV_ARGS(&w3))) && w3) {
+        w3->Resume();
+        w3->Release();
+    }
+    suspendRequested_ = false;
+}
+
 void UiApp::openAddSoundDialog() {
     IFileOpenDialog* dlg = nullptr;
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
@@ -612,6 +653,7 @@ void UiApp::convertPth(const nlohmann::json& j) {
     std::string gender = j.value("gender", std::string("other"));
     if (gender != "male" && gender != "female" && gender != "other") gender = "other";
     int pitch = std::max(-24, std::min(24, j.value("pitch", 0)));
+    const bool fp16 = j.value("fp16", false);
 
     const std::filesystem::path exeDir = exeDirectory();
     const std::wstring script = (exeDir / "tools" / "aivoice" / "voicedeck_convert.py").wstring();
@@ -625,7 +667,7 @@ void UiApp::convertPth(const nlohmann::json& j) {
 
     std::wstring cmd = bootstrapPython();
     cmd += L" \"" + script + L"\" \"" + dataDir + L"\" \"" + pth + L"\" \"" + name + L"\" " +
-           utf8ToUtf16(gender) + L" " + std::to_wstring(pitch);
+           utf8ToUtf16(gender) + L" " + std::to_wstring(pitch) + (fp16 ? L" fp16" : L"");
 
     notify("Конвертация запущена. При первом запуске установка зависимостей займёт несколько минут.");
     log::info("starting .pth conversion: %s", utf16ToUtf8(name).c_str());
@@ -1190,9 +1232,13 @@ LRESULT UiApp::wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     KillTimer(hwnd, kTimerMeters);
                     metersPaused_ = true;
                 }
-            } else if (metersPaused_) {
-                SetTimer(hwnd, kTimerMeters, 66, nullptr);
-                metersPaused_ = false;
+                suspendWebView();
+            } else {
+                resumeWebView();
+                if (metersPaused_) {
+                    SetTimer(hwnd, kTimerMeters, 66, nullptr);
+                    metersPaused_ = false;
+                }
             }
             return 0;
         }

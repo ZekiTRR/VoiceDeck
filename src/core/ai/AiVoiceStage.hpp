@@ -155,6 +155,8 @@ private:
     std::atomic<int> primeSamples_{std::numeric_limits<int>::max()};
     std::atomic<int> maxBuffered_{0};
     std::atomic<float> marginMs_{0.0f};
+    int blockDeviceSamples_ = 0; // worker-only: current voice block at 48 kHz
+    int lastPrimeMarginMs_ = -1; // worker-only: force prime recompute on change
     std::atomic<std::uint32_t> wake_{0};
 
     // Worker diagnostics (EMA of conversion time).

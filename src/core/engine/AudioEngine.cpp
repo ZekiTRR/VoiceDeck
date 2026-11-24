@@ -1,4 +1,5 @@
 #include "core/engine/AudioEngine.hpp"
+#include "core/platform/ThreadAffinity.hpp"
 #include "core/settings/Settings.hpp"
 #include "core/util/Log.hpp"
 
@@ -224,6 +225,9 @@ bool AudioEngine::start(std::size_t captureIdx, std::size_t playbackIdx, std::st
     }
     capRunning_ = true;
     playRunning_ = true;
+    // Soft P-core pinning after the device threads exist (one syscall each).
+    pinThreadToPerformanceCores(capDev_.thread);
+    pinThreadToPerformanceCores(playDev_.thread);
     curCaptureIdx_ = captureIdx;
     curPlaybackIdx_ = playbackIdx;
     running_.store(true, std::memory_order_relaxed);
@@ -293,6 +297,7 @@ bool AudioEngine::startMonitor(std::size_t playbackIdx, std::string& err) {
         return false;
     }
     monRunning_ = true;
+    pinThreadToPerformanceCores(monDev_.thread);
     curMonitorIdx_ = playbackIdx;
     return true;
 }

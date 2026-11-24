@@ -17,7 +17,8 @@ struct Settings {
 
     // AI voice tuning (detailed settings, persisted).
     std::string aiProvider = "auto"; // auto | cuda | dml | cpu
-    int aiPrimeMarginMs = 100;       // extra buffered delay beyond one block
+    int aiPrimeMarginMs = 20;        // extra buffered delay beyond one block
+                                     // (v2 50 ms block + 20 ms + 10 ms xfade = ~80 ms)
     int aiFadeMs = 30;               // wet/dry crossfade on (de)activation
     bool aiAutoLimit = true;         // auto-disable on audible dropouts
     int aiFlapLimit = 8;             // ...after N dropouts per 30 s

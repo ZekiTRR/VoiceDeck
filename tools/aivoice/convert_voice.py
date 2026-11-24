@@ -22,6 +22,13 @@ def main() -> None:
     ap.add_argument("--credits", default="Imported by the user.")
     ap.add_argument("--out", type=Path)
     ap.add_argument("--cache", type=Path)
+    ap.add_argument("--format", type=int, choices=[1, 2], default=2,
+                    help="model format: 2 = low latency (50/400/10), 1 = legacy (100/600/40)")
+    ap.add_argument("--block-ms", type=int, default=rx.DEFAULT_BLOCK_MS)
+    ap.add_argument("--context-ms", type=int, default=rx.DEFAULT_CONTEXT_MS)
+    ap.add_argument("--margin-frames", type=int, default=rx.DEFAULT_MARGIN_FRAMES)
+    ap.add_argument("--fp16", action="store_true",
+                    help="convert weights/graph to FP16 (GPU only; falls back to FP32)")
     a = ap.parse_args()
 
     out = a.out or (Path(os.environ.get("APPDATA", Path.home())) / "VoiceCtx" / "AiVoice" / "voices")
@@ -31,7 +38,8 @@ def main() -> None:
     path = rx.export_voice(a.pth, out, voice_id, {
         "name": a.name, "gender": a.gender, "defaultPitchShift": a.pitch_shift,
         "credits": a.credits, "license": "user supplied", "builtIn": False,
-    })
+    }, block_ms=a.block_ms, context_ms=a.context_ms, margin_frames=a.margin_frames,
+       format_version=a.format, fp16=a.fp16)
     print(f"wrote {path}")
 
 

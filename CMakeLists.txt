@@ -50,6 +50,7 @@ add_executable(voicedeck
     src/core/platform/HotkeyManager.cpp
     src/core/platform/AutoStart.cpp
     src/core/platform/Elevation.cpp
+    src/core/platform/ThreadAffinity.cpp
     third_party/miniaudio/miniaudio.c
 )
 

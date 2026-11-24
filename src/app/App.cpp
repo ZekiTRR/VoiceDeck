@@ -1221,6 +1221,7 @@ nlohmann::json App::statusJson() const {
         e["name"] = v.name;
         e["gender"] = v.gender;
         e["pitch"] = v.defaultPitchShift;
+        e["precision"] = v.precision;
         e["credits"] = v.credits;
         voicesArr.push_back(std::move(e));
     }

@@ -42,6 +42,7 @@ bool VoiceLibrary::loadJson(const std::filesystem::path& jsonFile, AiVoiceInfo& 
         out.marginFrames = jget("MarginFrames", "marginFrames", 0);
         out.gender = jget("Gender", "gender", std::string("other"));
         out.defaultPitchShift = jget("DefaultPitchShift", "defaultPitchShift", 0);
+        out.precision = jget("Precision", "precision", std::string("fp32"));
         out.credits = jget("Credits", "credits", std::string());
         out.license = jget("License", "license", std::string());
         out.builtIn = jget("BuiltIn", "builtIn", false);
@@ -52,8 +53,11 @@ bool VoiceLibrary::loadJson(const std::filesystem::path& jsonFile, AiVoiceInfo& 
 }
 
 bool VoiceLibrary::isSupported(const AiVoiceInfo& v) {
-    return v.format == 1 && !v.id.empty() && v.sampleRate >= 16000 && v.sampleRate <= 48000 &&
-           v.sampleRate % 100 == 0 && v.blockMs > 0 && v.contextMs > 0 && v.tail > v.marginFrames &&
+    // Format 1 (legacy 100/600/40) and format 2 (low-latency 50/400/10) share
+    // the same streaming math; only the dimensions differ.
+    return (v.format == 1 || v.format == 2) && !v.id.empty() && v.sampleRate >= 16000 &&
+           v.sampleRate <= 48000 && v.sampleRate % 100 == 0 && v.blockMs > 0 &&
+           v.contextMs > 0 && v.tail > v.marginFrames &&
            v.tail - v.marginFrames == v.blockMs / 10 &&
            v.frames == expectedFrames(v.blockMs, v.contextMs);
 }

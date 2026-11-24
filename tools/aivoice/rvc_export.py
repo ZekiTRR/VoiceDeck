@@ -16,16 +16,18 @@ from pathlib import Path
 
 import torch
 
-BLOCK_MS = 100
-CONTEXT_MS = 600
-MARGIN_FRAMES = 4
-N16K = (BLOCK_MS + CONTEXT_MS) * 16
-FRAMES = ((N16K - 400) // 320 + 1) * 2
-TAIL = BLOCK_MS // 10 + MARGIN_FRAMES
+# Streaming configuration. Format 2 is the low-latency default (50 ms hop,
+# 400 ms context, 10 ms crossfade); format 1 remains available for models that
+# must stay compatible with older Voice CTX builds.
+DEFAULT_BLOCK_MS = 50
+DEFAULT_CONTEXT_MS = 400
+DEFAULT_MARGIN_FRAMES = 1
+FORMAT_VERSION_V1 = 1
+FORMAT_VERSION_V2 = 2
+DEFAULT_FORMAT = FORMAT_VERSION_V2
 
 RVC_REPO = "https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI.git"
 RVC_COMMIT = "81eed5e8f68b6bed1789f682fe78cdd324495afc"
-FORMAT_VERSION = 1
 
 
 def sha256(path: Path) -> str:
@@ -122,7 +124,7 @@ def export_content_encoder(hubert_pt: Path, out: Path) -> None:
         def __init__(self, inner): super().__init__(); self.inner = inner
         def forward(self, wav16k): return self.inner(wav16k).last_hidden_state
 
-    x = torch.randn(1, N16K)
+    x = torch.randn(1, (DEFAULT_BLOCK_MS + DEFAULT_CONTEXT_MS) * 16)
     torch.onnx.export(Encoder(model).eval(), (x,), str(out), input_names=["wav16k"], output_names=["features"],
                       dynamic_axes={"wav16k": {1: "n"}, "features": {1: "t"}}, opset_version=17, do_constant_folding=True)
 
@@ -139,8 +141,28 @@ def load_voice_checkpoint(pth: Path):
     return ckpt
 
 
-def export_voice(pth: Path, out_dir: Path, voice_id: str, meta: dict) -> Path:
+def export_voice(pth: Path, out_dir: Path, voice_id: str, meta: dict,
+                 block_ms: int = DEFAULT_BLOCK_MS,
+                 context_ms: int = DEFAULT_CONTEXT_MS,
+                 margin_frames: int = DEFAULT_MARGIN_FRAMES,
+                 format_version: int = DEFAULT_FORMAT,
+                 fp16: bool = False) -> Path:
     from infer.module.models import SynthesizerTrnMs768NSFsid
+
+    if format_version == FORMAT_VERSION_V1:
+        block_ms, context_ms, margin_frames = 100, 600, 4
+    elif format_version != FORMAT_VERSION_V2:
+        raise ValueError(f"unsupported format version {format_version}")
+
+    block_ms = int(block_ms)
+    context_ms = int(context_ms)
+    margin_frames = int(margin_frames)
+    if block_ms <= 0 or context_ms <= 0 or margin_frames < 0:
+        raise ValueError("invalid streaming configuration (block/context/margin)")
+
+    n16k = (block_ms + context_ms) * 16
+    frames = ((n16k - 400) // 320 + 1) * 2
+    tail = block_ms // 10 + margin_frames
 
     ckpt = load_voice_checkpoint(pth)
     cfg = list(ckpt["config"])
@@ -162,21 +184,47 @@ def export_voice(pth: Path, out_dir: Path, voice_id: str, meta: dict) -> Path:
             z = self.n.flow(z_p, x_mask, g=g, reverse=True)[:, :, -nsff0.shape[1]:]
             return self.n.dec(z, nsff0, g=g).squeeze(1)
 
-    args = (torch.randn(1, FRAMES, 768), torch.randint(1, 255, (1, FRAMES)), torch.rand(1, TAIL) * 200 + 100,
-            torch.zeros(1, dtype=torch.long), torch.tensor(0.66666))
+    args = (torch.randn(1, frames, 768), torch.randint(1, 255, (1, frames)),
+            torch.rand(1, tail) * 200 + 100, torch.zeros(1, dtype=torch.long),
+            torch.tensor(0.66666))
     with torch.no_grad():
         y = Streaming(net)(*args)
-    assert torch.isfinite(y).all() and y.shape[-1] == TAIL * sample_rate // 100
+    assert torch.isfinite(y).all() and y.shape[-1] == tail * sample_rate // 100
 
     out_dir.mkdir(parents=True, exist_ok=True)
     onnx_path = out_dir / f"{voice_id}.onnx"
     torch.onnx.export(Streaming(net).eval(), args, str(onnx_path),
                       input_names=["phone", "pitch", "nsff0", "sid", "noise_scale"], output_names=["audio"],
                       opset_version=17, do_constant_folding=True)
+
+    precision = "fp32"
+    if fp16:
+        try:
+            import onnx
+            from onnxconverter_common import float16
+            model = onnx.load(str(onnx_path))
+            # The stochastic source module mixes RandomUniform with casts;
+            # keep that small subgraph FP32 to avoid type-inference failures.
+            keep_nodes = [n.name for n in model.graph.node
+                          if "l_sin_gen" in n.name or "m_source" in n.name]
+            model = float16.convert_float_to_float16(
+                model, keep_io_types=True,
+                # Precision-sensitive nodes stay FP32; everything else uses
+                # tensor cores / FP16 on the GPU provider.
+                op_block_list=["LayerNormalization", "Softmax", "ReduceMean",
+                               "RandomUniform", "RandomNormal",
+                               "RandomUniformLike", "RandomNormalLike"],
+                node_block_list=keep_nodes)
+            onnx.save(model, str(onnx_path))
+            precision = "fp16"
+        except Exception as exc:  # noqa: BLE001 - fallback is intentional
+            print(f"FP16 conversion failed, keeping FP32: {exc}")
+
     info = {
-        "format": FORMAT_VERSION, "id": voice_id, "sampleRate": sample_rate,
-        "blockMs": BLOCK_MS, "contextMs": CONTEXT_MS, "frames": FRAMES,
-        "tail": TAIL, "marginFrames": MARGIN_FRAMES, "speakers": int(cfg[-3]), **meta,
+        "format": format_version, "id": voice_id, "sampleRate": sample_rate,
+        "blockMs": block_ms, "contextMs": context_ms, "frames": frames,
+        "tail": tail, "marginFrames": margin_frames, "speakers": int(cfg[-3]),
+        "precision": precision, **meta,
     }
     (out_dir / f"{voice_id}.json").write_text(json.dumps(info, indent=2), encoding="utf-8")
     return onnx_path

@@ -6,9 +6,10 @@
 
 namespace vd {
 
-// Metadata written next to every voice model (format 1, Voice CTX
-// compatible). These are the "expected tensor dimensionalities" the
-// streaming pipeline is built around, validated at load time.
+// Metadata written next to every voice model. Format 1 is the Voice CTX
+// compatible 100/600/40 layout; format 2 is the low-latency 50/400/10
+// layout. These are the "expected tensor dimensionalities" the streaming
+// pipeline is built around, validated at load time.
 struct AiVoiceInfo {
     int format = 0;
     std::string id;
@@ -21,6 +22,7 @@ struct AiVoiceInfo {
     int marginFrames = 0;  // crossfade overlap frames
     std::string gender = "other";
     int defaultPitchShift = 0;
+    std::string precision = "fp32"; // "fp16" for GPU-optimized conversions
     std::string credits;
     std::string license;
     bool builtIn = false;

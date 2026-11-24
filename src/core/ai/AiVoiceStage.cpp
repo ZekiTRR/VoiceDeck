@@ -2,6 +2,8 @@
 
 #include "core/util/Log.hpp"
 
+#include <windows.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -18,6 +20,8 @@ AiVoiceStage::AiVoiceStage(int sampleRate, int maxBlockFrames, Controls& control
     preRoll_.assign(std::size_t(double(rate_) * 0.65), 0.0f);
     state_ = std::make_unique<WorkerState>(rate_);
     worker_ = std::thread([this] { workerLoop(); });
+    // Never REALTIME: the AI worker must not starve the UI or games.
+    SetThreadPriority(worker_.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
 }
 
 AiVoiceStage::~AiVoiceStage() {
@@ -240,19 +244,22 @@ void AiVoiceStage::workerLoop() {
             input_.discard(input_.available());
             continue;
         }
-        if (state_->configure(shape)) {
-            const int blockDeviceSamples =
+        const bool configured = state_->configure(shape);
+        if (configured) {
+            blockDeviceSamples_ =
                 int((std::int64_t(shape.blockSamples16k) * rate_) / kWorkerSampleRate);
             marginMs_.store(float(1000.0 * shape.marginSamples / shape.outputSampleRate),
                             std::memory_order_relaxed);
-            // Prime one block plus a live-tunable jitter margin; cap at three
-            // blocks total to bound the delay.
-            const int margin =
-                std::max(0, controls_.primeMarginMs.load(std::memory_order_relaxed));
+        }
+        // Also react to a live margin change while the same voice is loaded.
+        const int margin =
+            std::max(0, controls_.primeMarginMs.load(std::memory_order_relaxed));
+        if (configured || margin != lastPrimeMarginMs_) {
+            lastPrimeMarginMs_ = margin;
             const int prime =
-                blockDeviceSamples + int(double(rate_) * double(margin) * 0.001);
+                blockDeviceSamples_ + int(double(rate_) * double(margin) * 0.001);
             primeSamples_.store(prime, std::memory_order_relaxed);
-            maxBuffered_.store(prime + blockDeviceSamples * 2, std::memory_order_relaxed);
+            maxBuffered_.store(prime + blockDeviceSamples_ * 2, std::memory_order_relaxed);
         }
 
         std::size_t read;
