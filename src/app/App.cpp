@@ -126,6 +126,7 @@ void App::init() {
     // The device period is chosen at start(), so apply the persisted mode
     // BEFORE opening the devices.
     engine.setLatencyMode(settings.latencyMode);
+    engine.setVadThresholdDb(settings.vadThresholdDb);
 
     // Pick devices: saved names first, then auto (virtual cable).
     std::size_t capIdx = SIZE_MAX;
@@ -393,6 +394,14 @@ void App::setSoundLoop(std::uint64_t id, bool on) {
     engine.submit(c);
 }
 
+std::string App::setVadThresholdDb(float db) {
+    db = std::max(-60.0f, std::min(-20.0f, db));
+    settings.vadThresholdDb = db;
+    engine.setVadThresholdDb(db);
+    settings.save(settingsFile);
+    return "";
+}
+
 // ---------------------------------------------------------------- tags
 
 std::string App::setSoundTags(std::uint64_t id, const nlohmann::json& tags) {
@@ -629,6 +638,7 @@ std::string App::loadAiVoice(const std::string& name) {
     log::info("loading '%s' (a few seconds, GPU warm-up)...", v.name.c_str());
     const std::string err = engine.aiService().loadVoice(v);
     if (!err.empty()) return err;
+    engine.notifyAiWorker(); // new shape/session is ready
     Command p;
     p.type = Command::Type::SetAiPitch;
     p.value = float(v.defaultPitchShift);
@@ -687,6 +697,7 @@ std::string App::setAiProvider(const std::string& name) {
     AiProvider p;
     if (!ParseAiProvider(name, p)) return "unknown provider (use: auto|cuda|dml|cpu)";
     engine.aiService().setProviderHint(p);
+    engine.notifyAiWorker();
     settings.aiProvider = AiProviderName(p);
     settings.save(settingsFile);
     return "";
@@ -1074,6 +1085,8 @@ nlohmann::json App::metersJson() const {
     j["voiceLatency"] = engine.voiceLatencyMs();
     j["e2eLatency"] = engine.endToEndLatencyMs();
     j["micUnderruns"] = double(engine.micUnderruns());
+    j["vadSleeping"] = engine.vadSleeping();
+    j["vadThresholdDb"] = double(engine.vadThresholdDb());
     j["aiOn"] = engine.aiEnabled();
     j["aiReady"] = engine.aiService().isReady();
     j["aiLatency"] = engine.aiLatencyMs();
@@ -1237,6 +1250,8 @@ nlohmann::json App::statusJson() const {
     j["voiceLatency"] = engine.voiceLatencyMs();
     j["e2eLatency"] = engine.endToEndLatencyMs();
     j["micUnderruns"] = double(engine.micUnderruns());
+    j["vadSleeping"] = engine.vadSleeping();
+    j["vadThresholdDb"] = double(engine.vadThresholdDb());
     j["latencyMode"] = engine.latencyMode();
     j["capturePeriod"] = engine.actualCapturePeriodFrames();
     j["playbackPeriod"] = engine.actualPlaybackPeriodFrames();

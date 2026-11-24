@@ -70,6 +70,7 @@ private:
     Space space_ = Space::None;
     Effect effect_ = Effect::None;
     bool useStretch_ = false;
+    bool fastPath_ = false; // no stretch, no chain -> soft clipper, 0 ms
     double latencyMs_ = 0.0;
     float lfoPhase_ = 0.0f;
 
@@ -118,6 +119,9 @@ public:
     void setLatencyMode(int mode);
 
     void process(const float* in, float* out, std::size_t frames);
+
+    // Audio thread: drop reverb/delay/stretch tails (VAD sleep transition).
+    void resetTail();
 
     // Any thread.
     int activePresetIndex() const { return curIdx_.load(std::memory_order_relaxed); }

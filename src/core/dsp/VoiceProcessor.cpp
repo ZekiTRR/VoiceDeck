@@ -86,9 +86,21 @@ VoiceChain::VoiceChain(double sampleRate)
 }
 
 void VoiceChain::updateLatency() {
+    if (fastPath_) { // neutral preset: soft clipper only, zero lookahead
+        latencyMs_ = 0.0;
+        return;
+    }
     double s = double(limiter_.latencySamples());
     if (useStretch_) s += double(stretch_.inputLatency() + stretch_.outputLatency());
     latencyMs_ = s * 1000.0 / sr_;
+}
+
+// Rational tanh approximation: transparent at normal levels, never hard-clips.
+static inline float softClip(float x) {
+    const float ax = std::fabs(x);
+    if (ax >= 3.0f) return x > 0.0f ? 1.0f : -1.0f;
+    const float x2 = x * x;
+    return x * (27.0f + x2) / (27.0f + 9.0f * x2);
 }
 
 void VoiceChain::configure(const VoicePreset& p) {
@@ -343,20 +355,29 @@ void VoiceChain::process(const float* in, float* out, std::size_t frames, float 
         return;
     }
 
+    // 1. Character decision first: a neutral preset (no pitch/formant/LFO,
+    //    empty effect chain, full strength) takes a zero-latency fast path
+    //    with a soft clipper instead of the 5 ms lookahead limiter.
+    const float transpose = std::isnan(transposeOv) ? p_.transpose : transposeOv;
+    const float formant = std::isnan(formantOv) ? p_.formant : formantOv;
+    const bool wantStretch = (transpose != 0 || formant != 0 || p_.lfoDepth != 0);
+    const bool fast = !wantStretch && chain_.empty() && p_.strength >= 0.999f;
+    if (wantStretch != useStretch_ || fast != fastPath_) {
+        useStretch_ = wantStretch;
+        fastPath_ = fast;
+        updateLatency();
+    }
+    if (fast) {
+        for (std::size_t i = 0; i < frames * 2; ++i) out[i] = softClip(in[i]);
+        return;
+    }
+
     // 0. De-interleave (input is already enhanced at engine level).
     for (std::size_t i = 0; i < frames; ++i) {
         inL_[i] = in[i * 2];
         inR_[i] = in[i * 2 + 1];
     }
 
-    // 1. Character: pitch/formant via Signalsmith Stretch.
-    const float transpose = std::isnan(transposeOv) ? p_.transpose : transposeOv;
-    const float formant = std::isnan(formantOv) ? p_.formant : formantOv;
-    const bool wantStretch = (transpose != 0 || formant != 0 || p_.lfoDepth != 0);
-    if (wantStretch != useStretch_) {
-        useStretch_ = wantStretch;
-        updateLatency();
-    }
     const float* srcL = inL_.data();
     const float* srcR = inR_.data();
     if (useStretch_) {
@@ -476,6 +497,11 @@ void VoiceProcessor::setLatencyMode(int mode) {
     for (auto& chain : chains_) {
         chain.setStretchConfig(kBlock[mode], kInterval[mode]);
     }
+}
+
+void VoiceProcessor::resetTail() {
+    chains_[0].resetTail();
+    chains_[1].resetTail();
 }
 
 void VoiceProcessor::process(const float* in, float* out, std::size_t frames) {

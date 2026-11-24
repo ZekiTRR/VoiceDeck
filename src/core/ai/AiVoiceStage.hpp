@@ -5,12 +5,10 @@
 #include "core/engine/SpscQueue.hpp"
 
 #include <atomic>
-#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -34,6 +32,9 @@ public:
         std::atomic<int> fadeMs{30};        // wet/dry crossfade on (de)activation
         std::atomic<bool> autoLimit{true};  // auto-disable on audible dropouts
         std::atomic<int> flapLimit{8};     // ...after N dropouts per 30 s
+        // VAD sleep: the voice branch is paused; the stage keeps a pre-roll
+        // history and re-primes from it on wake.
+        std::atomic<bool> sleeping{false};
     };
 
     AiVoiceStage(int sampleRate, int maxBlockFrames, Controls& controls, AiVoiceService& service);
@@ -44,6 +45,13 @@ public:
     // Audio thread. in/out are interleaved stereo; the AI runs on the mono
     // mix and its delta is applied to both channels.
     void processStereo(const float* in, float* out, std::size_t frames);
+
+    // Audio thread (VAD sleep): keep the pre-roll history fresh while the
+    // voice branch is paused, without touching the inference worker.
+    void updatePreRoll(const float* stereo, std::size_t frames);
+
+    // Control thread: wake the worker after a model load/provider change.
+    void notifyWorker();
 
     // Any thread.
     int underruns() const { return int(underruns_.load(std::memory_order_relaxed)); }
@@ -69,6 +77,8 @@ private:
     // Audio thread core (mono, in-place wet/dry crossfade).
     void process(float* mono, std::size_t frames);
     void onUnderrun();
+    void pushPreRollMono(const float* mono, std::size_t frames);
+    void seedContextFromPreRoll();
 
     // Worker thread.
     void workerLoop();
@@ -80,6 +90,7 @@ private:
 
         bool configure(const ConverterShape& shape);
         void reset();
+        void seedContext(const float* samples16k, int count);
         void pushInput(const float* samples, int count);
         bool hasBlock() const { return pendingCount_ >= shape_.blockSamples16k && shape_.blockSamples16k > 0; }
         bool convertBlock(AiVoiceService& service, float pitchShift);
@@ -110,6 +121,10 @@ private:
 
     SpscQueue<float> input_{std::size_t(1) << 17}; // ~2.7 s at 48k
     SpscQueue<float> output_{std::size_t(1) << 17};
+    // Wake-up context (16 kHz) handed from the audio thread to the worker so
+    // the first inference sees the pre-roll without a 600 ms backlog.
+    SpscQueue<float> seed_{std::size_t(1) << 14};
+    std::atomic<bool> seedRequested_{false};
 
     // Audio-thread state.
     float wetGain_ = 0.0f;
@@ -124,8 +139,15 @@ private:
     std::vector<float> wet_;
     std::vector<float> monoIn_;
     std::vector<float> monoDry_;
+    // Last ~650 ms of the mono voice, recorded even while the VAD sleeps so
+    // the AI can re-prime with the beginning of the first phrase.
+    std::vector<float> preRoll_;
+    std::size_t preRollPos_ = 0;
+    bool preRollFull_ = false;
+    bool audioSleeping_ = false;
 
-    // Worker / cross-thread state.
+    // Worker / cross-thread state. The audio thread only stores a flag and
+    // notifies; the worker waits on the atomic (WaitOnAddress on Windows).
     std::unique_ptr<WorkerState> state_;
     std::thread worker_;
     std::atomic<bool> running_{true};
@@ -133,8 +155,7 @@ private:
     std::atomic<int> primeSamples_{std::numeric_limits<int>::max()};
     std::atomic<int> maxBuffered_{0};
     std::atomic<float> marginMs_{0.0f};
-    std::mutex sigMtx_;
-    std::condition_variable sigCv_;
+    std::atomic<std::uint32_t> wake_{0};
 
     // Worker diagnostics (EMA of conversion time).
     double convMs_ = 0.0;

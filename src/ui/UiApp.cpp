@@ -757,6 +757,12 @@ void UiApp::handleMessage(const std::string& jsonText) {
         pushMeters();
         return;
     }
+    if (cmd == "vadThreshold") {
+        const std::string err = app_.setVadThresholdDb(float(j.value("db", -48.0)));
+        if (!err.empty()) notify(err);
+        pushMeters();
+        return;
+    }
     if (cmd == "pitch") {
         app_.setPitchOverride(float(j.value("semi", 0.0)), j.value("on", true));
         pushMeters();

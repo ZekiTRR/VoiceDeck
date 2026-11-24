@@ -13,7 +13,9 @@
 
 #include "miniaudio.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -135,6 +137,17 @@ public:
     bool aiEnabled() const { return aiControls_.enabled.load(std::memory_order_relaxed); }
     int aiUnderruns() const { return aiStage_.underruns(); }
     double aiLatencyMs() const { return aiStage_.latencyMs(); }
+    // Wakes the AI worker after a model load/provider change (control thread).
+    void notifyAiWorker() { aiStage_.notifyWorker(); }
+
+    // Voice-activity gate: silence threshold in dBFS (-60..-20, default -48).
+    // The gate only sleeps the voice branch (DSP + AI); the soundboard keeps
+    // playing and the AI pre-roll keeps recording.
+    void setVadThresholdDb(float db);
+    float vadThresholdDb() const {
+        return 20.0f * std::log10(std::max(1e-6f, vadThresholdLinear_.load(std::memory_order_relaxed)));
+    }
+    bool vadSleeping() const { return vadSleeping_.load(std::memory_order_relaxed); }
 
     // Control threads: wait until all submitted commands have been applied
     // by the playback callback (queue empty + one audio block passed).
@@ -143,6 +156,28 @@ public:
     // Lock-free status meters (any thread).
     float micLevel() const { return micLevel_.load(std::memory_order_relaxed); }
     std::uint64_t micUnderruns() const { return micUnderruns_.load(std::memory_order_relaxed); }
+    std::uint64_t playTicks() const { return playTicks_.load(std::memory_order_relaxed); }
+    std::uint64_t capTicks() const { return capTicks_.load(std::memory_order_relaxed); }
+    std::uint64_t capFramesTotal() const {
+        return capFramesTotal_.load(std::memory_order_relaxed);
+    }
+    std::uint64_t playFramesTotal() const {
+        return playFramesTotal_.load(std::memory_order_relaxed);
+    }
+
+    std::uint32_t playbackMaxFrames() const {
+        return playbackMaxFrames_.load(std::memory_order_relaxed);
+    }
+    std::uint32_t lastUnderrunFrames() const {
+        return lastUnderrunFrames_.load(std::memory_order_relaxed);
+    }
+    double lastUnderrunFill() const {
+        return lastUnderrunFill_.load(std::memory_order_relaxed);
+    }
+    double micFillMin() const { return micPath_.minFillFrames(); }
+    double micFillMax() const { return micPath_.maxFillFrames(); }
+    double micDriftStep() const { return micPath_.step(); }
+    double micTargetFrames() const { return micPath_.targetFrames(); }
     std::uint64_t captureOverflows() const { return capOverflows_.load(std::memory_order_relaxed); }
     std::uint64_t monitorUnderruns() const { return monUnderruns_.load(std::memory_order_relaxed); }
 
@@ -204,9 +239,15 @@ private:
     std::atomic<float> micLevel_{0.0f};
     std::atomic<std::uint64_t> capOverflows_{0};
     std::atomic<std::uint64_t> micUnderruns_{0};
+    std::atomic<std::uint32_t> playbackMaxFrames_{0};
+    std::atomic<std::uint32_t> lastUnderrunFrames_{0};
+    std::atomic<double> lastUnderrunFill_{0.0};
     std::atomic<std::uint64_t> monUnderruns_{0};
     std::atomic<std::uint64_t> monOverflows_{0};
     std::atomic<std::uint64_t> playTicks_{0};
+    std::atomic<std::uint64_t> capTicks_{0};
+    std::atomic<std::uint64_t> capFramesTotal_{0};
+    std::atomic<std::uint64_t> playFramesTotal_{0};
     // Negotiated device parameters (set in start(), read by the UI/CLI).
     std::atomic<std::uint32_t> capPeriodFrames_{0};
     std::atomic<std::uint32_t> playPeriodFrames_{0};
@@ -228,6 +269,15 @@ private:
     float monBlock_[kMaxBlockFrames * kChannels] = {};
     float duck_ = 1.0f;  // audio-thread only
     float dspFade_ = 0.0f; // audio-thread only
+    // VAD / sleep state (audio thread owns the counters; atomics are read by UI).
+    std::atomic<float> vadThresholdLinear_{0.003981f}; // -48 dBFS
+    std::atomic<bool> vadSleeping_{false};
+    std::uint64_t vadQuietFrames_ = 0;
+    bool vadSleepState_ = false;
+    float vadWakeGain_ = 0.0f; // 10 ms fade-in after wake (audio thread)
+    double micTargetFrames_ = double(kMicTargetFillFrames);
+    std::uint64_t lastClockCap_ = 0;  // audio thread: callback-rate sampling
+    std::uint64_t lastClockPlay_ = 0;
 
     // Voice chain (audio-thread only) + preset storage (immutable at runtime).
     VoiceProcessor voice_{double(kSampleRate)};

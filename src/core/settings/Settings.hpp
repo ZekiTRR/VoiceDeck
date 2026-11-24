@@ -22,6 +22,10 @@ struct Settings {
     bool aiAutoLimit = true;         // auto-disable on audible dropouts
     int aiFlapLimit = 8;             // ...after N dropouts per 30 s
 
+    // Voice-activity gate: below this level for ~300 ms the DSP/AI branch
+    // sleeps (the soundboard keeps playing). -60..-20 dBFS.
+    float vadThresholdDb = -48.0f;
+
     // Latency mode: 0 = low (256 frames + 20ms Stretch), 1 = normal (480 + 40ms),
     // 2 = high quality (960 + 53ms). Trade CPU load for delay.
     int latencyMode = 0;

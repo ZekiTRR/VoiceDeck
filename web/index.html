@@ -60,6 +60,9 @@
           <label class="tool">Питч <input type="range" id="pitchOv" min="-24" max="24" step="1" value="0"><output id="pitchOvVal" class="mono">off</output></label>
           <label class="tool">Форманта <input type="range" id="formantOv" min="-24" max="24" step="1" value="0"><output id="formantOvVal" class="mono">off</output></label>
           <button class="btn" id="ovReset">сброс</button>
+          <label class="tool" title="Ниже этого порога голосовая ветка засыпает; звуки продолжают играть">
+            Тишина <input type="range" id="vadThreshold" min="-60" max="-20" step="1" value="-48">
+            <output id="vadThresholdVal" class="mono">-48 dB</output></label>
           <span class="spacer"></span>
           <button class="btn primary" id="addPresetBtn">+ Персонаж</button>
         </div>
@@ -217,7 +220,7 @@
 
     <!-- status bar -->
     <footer id="status">
-      <div class="led" id="micLed"></div>
+      <div class="led" id="micLed"><i class="vad-mark" id="vadMark" title="Порог тишины (VAD)"></i></div>
       <span class="mono mic-num" id="micNum">−∞</span>
       <span id="routeInfo">—</span>
       <span class="spacer"></span>

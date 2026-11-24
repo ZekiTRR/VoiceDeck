@@ -12,6 +12,7 @@
 - **Tags & search** — custom tags per clip, search by name or tag, tag filter chips. The built-in `hotkey` tag is added automatically whenever a sound gets a hotkey.
 - **Audio editor** — quick trim, global gain and per-region gain changes right in the app. Edits are non-destructive: the source file stays untouched, parameters live in `sounds.json`.
 - **Windows startup** — launch with Windows and an "always run as administrator" mode (UAC relaunch).
+- **Low latency & idle** — 256/480/960 buffer modes, an adaptive jitter buffer for virtual-cable clock drift, VAD sleep for the voice branch (the soundboard keeps playing) with AI pre-roll, and a zero-latency soft clipper. The silence threshold is adjustable on the Voice tab.
 - **45 voice characters** — pitch, formant, timbre, 8-band EQ, effect chains (radio → robot → cave), live editing with "Save as New".
 - **AI voice** — RVC v2 via ONNX Runtime (DirectML / CUDA / CPU), ~45–290 ms depending on model and GPU. Built-in `.pth` converter right from the UI.
 - **Devices** — mic and virtual cable selection, monitoring, latency mode, global hotkeys.

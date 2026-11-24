@@ -851,9 +851,22 @@ input[type="range"]::-webkit-slider-thumb {
 #latInfo, #glitchInfo, .mic-num { font-variant-numeric: tabular-nums; }
 
 .led {
+  position: relative;
   display: flex;
   gap: 2px;
   align-items: center;
+}
+.led.sleeping { opacity: .35; }
+.led .vad-mark {
+  position: absolute;
+  top: -3px; bottom: -3px;
+  width: 2px; height: auto;
+  margin-left: -1px;
+  background: var(--amber);
+  border-radius: 1px;
+  opacity: .9;
+  pointer-events: none;
+  z-index: 2;
 }
 .led i {
   width: 4px; height: 12px;

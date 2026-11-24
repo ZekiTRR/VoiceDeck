@@ -48,6 +48,8 @@ struct App {
     void stopAllSounds();
     void setSoundVolume(std::uint64_t id, int pct);
     void setSoundLoop(std::uint64_t id, bool on);
+    // Voice-activity gate threshold (-60..-20 dBFS); persists to settings.
+    std::string setVadThresholdDb(float db);
 
     // --- tags ---------------------------------------------------------------
     // `tags` is a JSON array of strings. Persists to sounds.json immediately.

@@ -2,6 +2,7 @@
 
 #include "nlohmann/json.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <system_error>
@@ -37,6 +38,8 @@ bool Settings::load(const std::filesystem::path& file) {
         aiFadeMs = j.value("aiFadeMs", 30);
         aiAutoLimit = j.value("aiAutoLimit", true);
         aiFlapLimit = j.value("aiFlapLimit", 8);
+        vadThresholdDb = j.value("vadThresholdDb", -48.0f);
+        vadThresholdDb = std::max(-60.0f, std::min(-20.0f, vadThresholdDb));
         latencyMode = j.value("latencyMode", 0);
         runAsAdmin = j.value("runAsAdmin", false);
         voiceHotkey = j.value("voiceHotkey", "");
@@ -59,6 +62,7 @@ bool Settings::save(const std::filesystem::path& file) const {
     j["aiFadeMs"] = aiFadeMs;
     j["aiAutoLimit"] = aiAutoLimit;
     j["aiFlapLimit"] = aiFlapLimit;
+    j["vadThresholdDb"] = vadThresholdDb;
     j["latencyMode"] = latencyMode;
     j["runAsAdmin"] = runAsAdmin;
     j["voiceHotkey"] = voiceHotkey;

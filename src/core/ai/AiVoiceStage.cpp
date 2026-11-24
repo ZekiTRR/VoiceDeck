@@ -14,17 +14,61 @@ AiVoiceStage::AiVoiceStage(int sampleRate, int maxBlockFrames, Controls& control
     wet_.resize(std::size_t(maxBlockFrames));
     monoIn_.resize(std::size_t(maxBlockFrames));
     monoDry_.resize(std::size_t(maxBlockFrames));
+    // 650 ms covers the 600 ms v1 context plus resampler edges.
+    preRoll_.assign(std::size_t(double(rate_) * 0.65), 0.0f);
     state_ = std::make_unique<WorkerState>(rate_);
     worker_ = std::thread([this] { workerLoop(); });
 }
 
 AiVoiceStage::~AiVoiceStage() {
     running_.store(false, std::memory_order_relaxed);
-    {
-        std::lock_guard<std::mutex> lk(sigMtx_);
-        sigCv_.notify_all();
-    }
+    wake_.store(1, std::memory_order_relaxed);
+    wake_.notify_one();
     if (worker_.joinable()) worker_.join();
+}
+
+void AiVoiceStage::notifyWorker() {
+    wake_.store(1, std::memory_order_relaxed);
+    wake_.notify_one();
+}
+
+void AiVoiceStage::pushPreRollMono(const float* mono, std::size_t frames) {
+    if (preRoll_.empty()) return;
+    for (std::size_t i = 0; i < frames; ++i) {
+        preRoll_[preRollPos_] = mono[i];
+        ++preRollPos_;
+        if (preRollPos_ >= preRoll_.size()) {
+            preRollPos_ = 0;
+            preRollFull_ = true;
+        }
+    }
+}
+
+void AiVoiceStage::updatePreRoll(const float* stereo, std::size_t frames) {
+    if (preRoll_.empty()) return;
+    for (std::size_t i = 0; i < frames; ++i) {
+        preRoll_[preRollPos_] = (stereo[i * 2] + stereo[i * 2 + 1]) * 0.5f;
+        ++preRollPos_;
+        if (preRollPos_ >= preRoll_.size()) {
+            preRollPos_ = 0;
+            preRollFull_ = true;
+        }
+    }
+}
+
+void AiVoiceStage::seedContextFromPreRoll() {
+    if (preRoll_.empty() || seedRequested_.load(std::memory_order_relaxed)) return;
+    const std::size_t total = preRollFull_ ? preRoll_.size() : preRollPos_;
+    if (total < 3) return;
+    const std::size_t start = preRollFull_ ? preRollPos_ : 0;
+    // 48 kHz -> 16 kHz: average groups of three samples (cheap anti-alias).
+    for (std::size_t i = 0; i + 2 < total; i += 3) {
+        const float a = preRoll_[(start + i) % preRoll_.size()];
+        const float b = preRoll_[(start + i + 1) % preRoll_.size()];
+        const float c = preRoll_[(start + i + 2) % preRoll_.size()];
+        if (!seed_.push((a + b + c) / 3.0f)) break;
+    }
+    seedRequested_.store(true, std::memory_order_relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -34,6 +78,7 @@ AiVoiceStage::~AiVoiceStage() {
 void AiVoiceStage::processStereo(const float* in, float* out, std::size_t frames) {
     for (std::size_t i = 0; i < frames; ++i)
         monoIn_[i] = (in[i * 2] + in[i * 2 + 1]) * 0.5f;
+    pushPreRollMono(monoIn_.data(), frames);
     std::memcpy(monoDry_.data(), monoIn_.data(), frames * sizeof(float));
 
     process(monoIn_.data(), frames);
@@ -47,6 +92,27 @@ void AiVoiceStage::processStereo(const float* in, float* out, std::size_t frames
 }
 
 void AiVoiceStage::process(float* mono, std::size_t frames) {
+    // VAD sleep: the engine already zeroes the voice branch and feeds the
+    // pre-roll through updatePreRoll(). Do not wake the worker at all.
+    if (controls_.sleeping.load(std::memory_order_relaxed)) {
+        audioSleeping_ = true;
+        wetGain_ = 0.0f;
+        return;
+    }
+    if (audioSleeping_) {
+        // Wake: re-prime from the pre-roll so the first consonant is not lost.
+        audioSleeping_ = false;
+        if (!active_) {
+            active_ = true;
+            flapCount_.store(0, std::memory_order_relaxed);
+            flapWindowStart_ = clock_;
+        }
+        output_.discard(output_.available());
+        seedContextFromPreRoll();
+        primed_ = false;
+        notifyWorker();
+    }
+
     const bool want = controls_.enabled.load(std::memory_order_relaxed) && service_.isReady();
     if (!want && !active_ && wetGain_ <= 0.0f) return;
 
@@ -61,7 +127,7 @@ void AiVoiceStage::process(float* mono, std::size_t frames) {
 
     if (active_) {
         input_.write(mono, frames);
-        sigCv_.notify_one(); // lock-free nudge; 50 ms poll catches the rest
+        notifyWorker();
         quietSamples_ = isQuiet(mono, frames) ? quietSamples_ + std::int64_t(frames) : 0;
     }
 
@@ -139,12 +205,30 @@ void AiVoiceStage::onUnderrun() {
 void AiVoiceStage::workerLoop() {
     std::vector<float> chunk(std::size_t(rate_ / 10));
     while (running_.load(std::memory_order_relaxed)) {
-        {
-            std::unique_lock<std::mutex> lk(sigMtx_);
-            sigCv_.wait_for(lk, std::chrono::milliseconds(50),
-                            [this] { return !running_.load(std::memory_order_relaxed); });
-        }
+        // WaitOnAddress-backed atomic wait: no mutex and no condition
+        // variable anywhere on the audio -> worker path.
+        wake_.wait(0, std::memory_order_relaxed);
         if (!running_.load(std::memory_order_relaxed)) break;
+        wake_.store(0, std::memory_order_relaxed);
+
+        if (controls_.sleeping.load(std::memory_order_relaxed)) {
+            input_.discard(input_.available());
+            output_.discard(output_.available());
+            seed_.discard(seed_.available());
+            seedRequested_.store(false, std::memory_order_relaxed);
+            if (state_) state_->reset();
+            resetRequested_.store(false, std::memory_order_relaxed);
+            continue;
+        }
+
+        if (seedRequested_.exchange(false, std::memory_order_relaxed) && state_) {
+            std::vector<float> seed;
+            float tmp[512];
+            std::size_t n;
+            while ((n = seed_.read(tmp, 512)) > 0)
+                seed.insert(seed.end(), tmp, tmp + n);
+            state_->seedContext(seed.data(), int(seed.size()));
+        }
 
         if (resetRequested_.exchange(false, std::memory_order_relaxed)) {
             input_.discard(input_.available());
@@ -241,6 +325,19 @@ void AiVoiceStage::WorkerState::reset() {
     std::fill(tailMemory_.begin(), tailMemory_.end(), 0.0f);
     pendingCount_ = 0;
     hasPrevious_ = false;
+}
+
+void AiVoiceStage::WorkerState::seedContext(const float* samples16k, int count) {
+    if (shape_.contextSamples16k <= 0 || count <= 0) return;
+    const int copy = std::min(count, shape_.contextSamples16k);
+    std::fill(context_.begin(), context_.end(), 0.0f);
+    std::copy(samples16k + (count - copy), samples16k + count,
+              context_.begin() + (shape_.contextSamples16k - copy));
+    pendingCount_ = 0;
+    hasPrevious_ = false;
+    deviceCount_ = 0;
+    if (toWorker_) toWorker_->reset();
+    if (toDevice_) toDevice_->reset();
 }
 
 void AiVoiceStage::WorkerState::pushInput(const float* samples, int count) {

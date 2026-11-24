@@ -99,6 +99,7 @@ void printHelp() {
     vd::log::info("  admin on|off                 always run as administrator (UAC relaunch)");
     vd::log::info("  bypass on|off                voice path on/off (clip output continues)");
     vd::log::info("  ducking on|off               auto-lower clips while you speak");
+    vd::log::info("  vad <-60..-20>               voice-branch silence threshold (dBFS)");
     vd::log::info("  presets                      list voice characters");
     vd::log::info("  preset <name|index>          apply a voice character");
     vd::log::info("  voice on|off                 voice DSP chain on/off");
@@ -180,6 +181,8 @@ void printStatus(App& app) {
                   app.engine.bypassEnabled() ? "ON" : "OFF",
                   app.engine.duckingOn() ? "ON" : "OFF",
                   app.engine.monitorRunning() ? "on" : "off");
+    vd::log::info("VAD       : %.0f dBFS, voice branch %s", double(app.engine.vadThresholdDb()),
+                  app.engine.vadSleeping() ? "SLEEPING" : "awake");
     const auto clips = app.bank.snapshot();
     vd::log::info("library   : %zu clip(s)", clips.size());
     const auto voices = app.engine.mixer().snapshot();
@@ -197,6 +200,18 @@ void printStatus(App& app) {
                   static_cast<unsigned long long>(app.engine.captureOverflows()),
                   static_cast<unsigned long long>(app.engine.monitorUnderruns()),
                   static_cast<unsigned long long>(app.engine.mixer().rejectedPlays()));
+    vd::log::info("playback  : max callback %u frames, last underrun %u at fill %.0f",
+                  app.engine.playbackMaxFrames(), app.engine.lastUnderrunFrames(),
+                  app.engine.lastUnderrunFill());
+    vd::log::info("pipeline  : mic fill min/max %.0f/%.0f, target %.0f, drift step %.4f",
+                  app.engine.micFillMin(), app.engine.micFillMax(),
+                  app.engine.micTargetFrames(), app.engine.micDriftStep());
+    vd::log::info("callbacks : capture %llu / playback %llu (ratio %.3f)",
+                  static_cast<unsigned long long>(app.engine.capTicks()),
+                  static_cast<unsigned long long>(app.engine.playTicks()),
+                  app.engine.capTicks() ? double(app.engine.playTicks()) /
+                                              double(app.engine.capTicks())
+                                        : 0.0);
 }
 
 void printPresets(App& app) {
@@ -508,6 +523,16 @@ bool handleCommand(App& app, const std::string& raw, bool& quit) {
         const bool on = (t.size() >= 2) ? (toLower(t[1]) == "on") : !app.duckingOn;
         app.setDucking(on);
         vd::log::info("ducking: %s", app.engine.duckingOn() ? "ON" : "OFF");
+        return true;
+    }
+    if (c == "vad") {
+        if (t.size() < 2) {
+            vd::log::warn("usage: vad <-60..-20>   (dBFS, default -48)");
+            return true;
+        }
+        const std::string err = app.setVadThresholdDb(float(std::atof(t[1].c_str())));
+        if (!err.empty()) vd::log::error("vad: %s", err.c_str());
+        else vd::log::info("VAD threshold: %.0f dBFS", double(app.engine.vadThresholdDb()));
         return true;
     }
 

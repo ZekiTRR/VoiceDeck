@@ -148,13 +148,17 @@ function demoState(){
     devices:{capture:[{idx:0,name:"Микрофон (USB)",def:true}],
       playback:[{idx:0,name:"Line 1 (VAC)",def:true},{idx:1,name:"Динамики",def:false}],
       curCapture:0,curPlayback:0,curMonitor:-1,running:true},
-    mic:0.03,voiceLatency:45,micUnderruns:4,latencyMode:1,hotkeys:{voice:"Ctrl+Alt+V",ai:""}};
+    mic:0.03,voiceLatency:0,e2eLatency:47,micUnderruns:0,latencyMode:0,
+    vadThresholdDb:-48,vadSleeping:false,hotkeys:{voice:"Ctrl+Alt+V",ai:""}};
 }
 
 function setSwitch(el,on){el.classList.toggle("on",!!on);}
 function updateTopLive(){if(!S)return;
-  const p=[];if(S.dspOn)p.push("DSP "+Math.round(S.voiceLatency)+" ms");
-  if(S.ai.ready&&S.ai.enabled)p.push("AI "+Math.round(S.ai.latency)+" ms");
+  const p=[];
+  if(S.e2eLatency!=null)p.push("Тракт "+Math.round(S.e2eLatency)+" мс");
+  if(S.dspOn)p.push("DSP "+Math.round(S.voiceLatency)+" мс");
+  if(S.ai.ready&&S.ai.enabled)p.push("AI "+Math.round(S.ai.latency)+" мс");
+  if(S.vadSleeping)p.push("VAD sleep");
   $("topLive").textContent=p.join("   ·   ");}
 
 function renderState(){
@@ -163,6 +167,10 @@ function renderState(){
   setSwitch($("monitorBtn"),S.devices.curMonitor>=0);
   renderPresets();renderTagFilter();renderSounds();renderAi();
   if(!settingsRenderedOnce){renderSettings();settingsRenderedOnce=true;}
+  if(S.vadThresholdDb!=null&&document.activeElement!==$("vadThreshold")){
+    $("vadThreshold").value=Math.round(S.vadThresholdDb);
+    $("vadThresholdVal").textContent=Math.round(S.vadThresholdDb)+" dB";
+  }
   updateTopLive();
   // Auto-open the editor for the currently active preset (safe: don't let
   // editor errors block the uiReady handshake).
@@ -789,6 +797,16 @@ function renderMeters(m){
   for(let i=0;i<LED_N;i++){const seg=segs[i];seg.className=i<lit?"on":"";
     if(i<lit){if(i>=LED_N*0.85)seg.classList.add("hot");else if(i>=LED_N*0.6)seg.classList.add("warn");}}
   $("micNum").textContent=m.mic>0.0005?(20*Math.log10(m.mic)).toFixed(0)+" dB":"−∞";
+  if(m.vadThresholdDb!=null)S.vadThresholdDb=m.vadThresholdDb;
+  if(m.vadSleeping!=null)S.vadSleeping=m.vadSleeping;
+  if(m.e2eLatency!=null)S.e2eLatency=m.e2eLatency;
+  if(m.voiceLatency!=null)S.voiceLatency=m.voiceLatency;
+  if(m.dspOn!=null)S.dspOn=m.dspOn;
+  if(m.aiOn!=null){S.ai.enabled=m.aiOn;if(m.aiLatency!=null)S.ai.latency=m.aiLatency;}
+  const thr=Math.pow(10,(S.vadThresholdDb!=null?S.vadThresholdDb:-48)/20);
+  const mark=$("vadMark");
+  if(mark)mark.style.left=(Math.sqrt(Math.min(1,thr*6))*100).toFixed(1)+"%";
+  $("micLed").classList.toggle("sleeping",!!S.vadSleeping);
   playingIds.clear();pausedIds.clear();
   for(const p of(m.playing||[])){const id=typeof p==="object"?p.id:p;playingIds.add(id);
     if(typeof p==="object"&&p.paused)pausedIds.add(id);
@@ -830,6 +848,15 @@ function ovSend(){
 $("pitchOv").addEventListener("input",ovSend);
 $("formantOv").addEventListener("input",ovSend);
 $("ovReset").addEventListener("click",()=>{$("pitchOv").value=0;$("formantOv").value=0;ovSend();});
+// VAD threshold (dBFS): below it for ~300 ms the voice branch sleeps.
+let vadTimer=null;
+$("vadThreshold").addEventListener("input",e=>{
+  const db=+e.target.value;
+  $("vadThresholdVal").textContent=db+" dB";
+  if(S)S.vadThresholdDb=db;
+  clearTimeout(vadTimer);
+  vadTimer=setTimeout(()=>send({cmd:"vadThreshold",db:db}),150);
+});
 
 // Soundboard
 $("addSoundBtn").addEventListener("click",()=>send({cmd:"addFileDialog"}));

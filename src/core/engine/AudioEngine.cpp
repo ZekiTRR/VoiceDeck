@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <thread>
 
 namespace vd {
 
@@ -19,8 +20,13 @@ constexpr std::size_t kFadeRampFrames = 960;
 } // namespace
 
 void AudioEngine::setLatencyMode(int mode) {
-    if (mode < 0 || mode > 2) mode = 1;
+    if (mode < 0 || mode > 2) mode = 0;
     latencyMode_.store(mode, std::memory_order_relaxed);
+}
+
+void AudioEngine::setVadThresholdDb(float db) {
+    db = std::max(-60.0f, std::min(-20.0f, db));
+    vadThresholdLinear_.store(std::pow(10.0f, db / 20.0f), std::memory_order_relaxed);
 }
 
 AudioEngine::AudioEngine(const SoundBank& bank)
@@ -101,6 +107,7 @@ bool AudioEngine::start(std::size_t captureIdx, std::size_t playbackIdx, std::st
     capCfg.capture.pDeviceID = &activeCaptureId_;
     capCfg.sampleRate = kSampleRate;
     capCfg.periodSizeInFrames = currentPeriodFrames();
+    capCfg.periods = 2;
     capCfg.performanceProfile = ma_performance_profile_low_latency;
     capCfg.wasapi.usage = ma_wasapi_usage_pro_audio; // MMCSS "Pro Audio" thread
     capCfg.dataCallback = &AudioEngine::captureDataCb;
@@ -132,6 +139,7 @@ bool AudioEngine::start(std::size_t captureIdx, std::size_t playbackIdx, std::st
     playCfg.playback.pDeviceID = &activePlaybackId_;
     playCfg.sampleRate = kSampleRate;
     playCfg.periodSizeInFrames = currentPeriodFrames();
+    playCfg.periods = 4;
     playCfg.performanceProfile = ma_performance_profile_low_latency;
     playCfg.wasapi.usage = ma_wasapi_usage_pro_audio; // MMCSS "Pro Audio" thread
     playCfg.dataCallback = &AudioEngine::playbackDataCb;
@@ -158,16 +166,58 @@ bool AudioEngine::start(std::size_t captureIdx, std::size_t playbackIdx, std::st
                   playDev_.wasapi.actualBufferSizeInFramesPlayback, int(p.shareMode));
     }
 
+    // Target backlog = 1.75x the LARGER of the two callback periods. Using
+    // only the playback period would let a 480-frame capture batch starve a
+    // 256-frame playback callback. This is inside the 1.5..2.0x window.
+    const std::uint32_t capPeriod = capPeriodFrames_.load(std::memory_order_relaxed);
+    const std::uint32_t playPeriod = playPeriodFrames_.load(std::memory_order_relaxed);
+    const std::uint32_t quantum = std::max(capPeriod, playPeriod);
+    micTargetFrames_ = double(std::max<std::uint32_t>(1, quantum)) * 2.0;
+    micPath_.setTargetFrames(micTargetFrames_);
+    log::info("mic ring target: %.0f frames (%.2f ms, quantum %u)",
+              micTargetFrames_, 1000.0 * micTargetFrames_ / double(kSampleRate), quantum);
+
     micRing_.reset();
     micPath_.reset();
     monitorRing_.reset();
     monPath_.reset();
     duck_ = 1.0f;
+    vadQuietFrames_ = 0;
+    vadSleepState_ = false;
+    vadWakeGain_ = 0.0f;
+    vadSleeping_.store(false, std::memory_order_relaxed);
+    aiControls_.sleeping.store(false, std::memory_order_relaxed);
     capOverflows_.store(0, std::memory_order_relaxed);
     micUnderruns_.store(0, std::memory_order_relaxed);
+    playbackMaxFrames_.store(0, std::memory_order_relaxed);
+    lastUnderrunFrames_.store(0, std::memory_order_relaxed);
+    lastUnderrunFill_.store(0.0, std::memory_order_relaxed);
+    capTicks_.store(0, std::memory_order_relaxed);
+    playTicks_.store(0, std::memory_order_relaxed);
+    capFramesTotal_.store(0, std::memory_order_relaxed);
+    playFramesTotal_.store(0, std::memory_order_relaxed);
+    lastClockCap_ = 0;
+    lastClockPlay_ = 0;
 
-    if (ma_device_start(&capDev_) != MA_SUCCESS || ma_device_start(&playDev_) != MA_SUCCESS) {
-        err = "failed to start devices";
+    // Start capture first and wait for the prefill, so the first playback
+    // callback already has a full target backlog (zero startup underruns).
+    if (ma_device_start(&capDev_) != MA_SUCCESS) {
+        err = "failed to start capture device";
+        ma_device_uninit(&playDev_);
+        ma_device_uninit(&capDev_);
+        return false;
+    }
+    // Prefill 2x the steady-state target: the extra headroom absorbs the
+    // virtual cable's clock offset while the controller is still pulling in.
+    const std::size_t wantSamples =
+        std::size_t(micTargetFrames_ * 4.0) * std::size_t(kChannels);
+    for (int i = 0; i < 300 && micRing_.available() < wantSamples; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    if (micRing_.available() < wantSamples)
+        log::warn("mic prefill timed out (have %zu of %zu samples)",
+                  micRing_.available(), wantSamples);
+    if (ma_device_start(&playDev_) != MA_SUCCESS) {
+        err = "failed to start playback device";
         ma_device_uninit(&playDev_);
         ma_device_uninit(&capDev_);
         return false;
@@ -219,6 +269,7 @@ bool AudioEngine::startMonitor(std::size_t playbackIdx, std::string& err) {
     cfg.playback.pDeviceID = &activeMonitorId_;
     cfg.sampleRate = kSampleRate;
     cfg.periodSizeInFrames = currentPeriodFrames();
+    cfg.periods = 2;
     cfg.performanceProfile = ma_performance_profile_low_latency;
     cfg.wasapi.usage = ma_wasapi_usage_pro_audio;
     cfg.dataCallback = &AudioEngine::monitorDataCb;
@@ -228,6 +279,9 @@ bool AudioEngine::startMonitor(std::size_t playbackIdx, std::string& err) {
         return false;
     }
 
+    const std::uint32_t monPeriod = monDev_.playback.internalPeriodSizeInFrames;
+    const std::uint32_t playPeriod = playPeriodFrames_.load(std::memory_order_relaxed);
+    monPath_.setTargetFrames(double(std::max(monPeriod, playPeriod)) * 2.0);
     monitorRing_.reset();
     monPath_.reset();
     // Start feeding before the consumer starts so the path prefills.
@@ -289,7 +343,8 @@ double AudioEngine::endToEndLatencyMs() const {
                  micPath_.averageFillFrames()) *
                 1000.0 / rate;
     // The character chain (and AI, when active) sits between capture and mix.
-    if (bypassEnabled() && dspOn()) {
+    // While the VAD sleeps the voice branch is skipped, so it adds no delay.
+    if (bypassEnabled() && dspOn() && !vadSleeping()) {
         ms += double(voiceLatencyMs());
         if (aiEnabled() && aiService_.isReady()) ms += aiLatencyMs();
     }
@@ -304,6 +359,8 @@ void AudioEngine::captureDataCb(ma_device* pDevice, void* /*pOutput*/, const voi
                                 ma_uint32 frameCount) {
     auto* self = static_cast<AudioEngine*>(pDevice->pUserData);
     if (pInput == nullptr || frameCount == 0) return;
+    self->capTicks_.fetch_add(1, std::memory_order_relaxed);
+    self->capFramesTotal_.fetch_add(frameCount, std::memory_order_relaxed);
     const float* in = static_cast<const float*>(pInput);
     const std::size_t n = std::size_t(frameCount) * kChannels;
     if (self->micRing_.write(in, n) < n)
@@ -322,6 +379,25 @@ void AudioEngine::playbackDataCb(ma_device* pDevice, void* pOutput, const void* 
     float* out = static_cast<float*>(pOutput);
     const std::size_t frames = frameCount;
     self->playTicks_.fetch_add(1, std::memory_order_relaxed);
+    self->playFramesTotal_.fetch_add(frameCount, std::memory_order_relaxed);
+    // Feed-forward clock ratio: every 64 callbacks (~0.34 s) compare how many
+    // frames capture produced vs playback consumed. Virtual cables can be
+    // several percent off; this converges in one window instead of slowly
+    // draining the ring. The first sample only seeds the counters.
+    if ((self->playTicks_.load(std::memory_order_relaxed) & 63) == 0) {
+        const std::uint64_t capFrames =
+            self->capFramesTotal_.load(std::memory_order_relaxed);
+        const std::uint64_t playFrames =
+            self->playFramesTotal_.load(std::memory_order_relaxed);
+        if (self->lastClockCap_ != 0 && self->lastClockPlay_ != 0 &&
+            capFrames > self->lastClockCap_ && playFrames > self->lastClockPlay_) {
+            const std::uint64_t dCap = capFrames - self->lastClockCap_;
+            const std::uint64_t dPlay = playFrames - self->lastClockPlay_;
+            self->micPath_.setFeedForward(double(dCap) / double(dPlay));
+        }
+        self->lastClockCap_ = capFrames;
+        self->lastClockPlay_ = playFrames;
+    }
 
     if (frames > kMaxBlockFrames) { // cannot happen with our period config, just in case
         std::memset(out, 0, frames * kChannels * sizeof(float));
@@ -380,18 +456,56 @@ void AudioEngine::playbackDataCb(ma_device* pDevice, void* pOutput, const void* 
 
     // 2. Mic path with drift correction. Always pulled - even when bypassed -
     //    so the ring keeps draining and meters/ducking stay alive.
+    if (frameCount > self->playbackMaxFrames_.load(std::memory_order_relaxed))
+        self->playbackMaxFrames_.store(frameCount, std::memory_order_relaxed);
     const std::size_t produced = self->micPath_.pull(self->micRing_, self->micBlock_, frames);
     if (produced < frames) {
         std::memset(self->micBlock_ + produced * kChannels, 0,
                     (frames - produced) * kChannels * sizeof(float));
         self->micUnderruns_.fetch_add(1, std::memory_order_relaxed);
+        self->lastUnderrunFrames_.store(frameCount, std::memory_order_relaxed);
+        self->lastUnderrunFill_.store(self->micPath_.lastFillFrames(),
+                                      std::memory_order_relaxed);
+    }
+
+    // 2b. Voice-activity gate (RMS with hysteresis). After ~300 ms below the
+    //     configured threshold the voice branch (enhance + AI + character)
+    //     sleeps; the soundboard and preview keep running. The AI stage keeps
+    //     a pre-roll history while asleep.
+    {
+        const float thr = self->vadThresholdLinear_.load(std::memory_order_relaxed);
+        double sum = 0.0;
+        const std::size_t n = frames * kChannels;
+        for (std::size_t i = 0; i < n; ++i) sum += double(self->micBlock_[i]) * double(self->micBlock_[i]);
+        const double rms = std::sqrt(sum / double(n));
+        const float wakeThr = thr * 1.58489319f; // +4 dB hysteresis
+        bool sleep = self->vadSleepState_;
+        if (rms < double(thr)) {
+            self->vadQuietFrames_ += frames;
+            if (!sleep && self->vadQuietFrames_ >= std::uint64_t(kSampleRate) * 3 / 10)
+                sleep = true;
+        } else {
+            self->vadQuietFrames_ = 0;
+            if (sleep && rms > double(wakeThr)) sleep = false;
+        }
+        if (sleep != self->vadSleepState_) {
+            self->vadSleepState_ = sleep;
+            self->vadWakeGain_ = 0.0f;
+            self->vadSleeping_.store(sleep, std::memory_order_relaxed);
+            self->aiControls_.sleeping.store(sleep, std::memory_order_relaxed);
+            if (sleep) {
+                self->voice_.resetTail(); // drop stale reverb/delay tails
+                self->aiStage_.notifyWorker(); // worker drains input/output and resets
+            }
+        }
     }
 
     // 3. Voice path. Enhancement (rumble cut, gate, compressor, timbre) is
     //    engine-level and always applies - same as Voice CTX's studio chain.
     //    The AI stage (optional) and the character chain sit after it.
-    if (!self->bypassEnabled()) {
+    if (!self->bypassEnabled() || self->vadSleepState_) {
         std::memset(out, 0, frames * kChannels * sizeof(float));
+        if (self->vadSleepState_) self->aiStage_.updatePreRoll(self->micBlock_, frames);
     } else {
         self->processEnhance(self->micBlock_, self->enhBlock_, frames);
 
@@ -413,6 +527,16 @@ void AudioEngine::playbackDataCb(ma_device* pDevice, void* pOutput, const void* 
             for (std::size_t i = 0; i < frames * kChannels; ++i) out[i] = enh[i] * d + dsp[i] * f;
         } else {
             std::memcpy(out, self->enhBlock_, frames * kChannels * sizeof(float));
+        }
+    }
+
+    // 3b. 10 ms fade-in after a VAD wake (avoids a click on the first block).
+    if (!self->vadSleepState_ && self->vadWakeGain_ < 1.0f) {
+        const float step = 1.0f / (0.010f * float(kSampleRate));
+        for (std::size_t i = 0; i < frames; ++i) {
+            self->vadWakeGain_ = std::min(1.0f, self->vadWakeGain_ + step);
+            out[i * 2] *= self->vadWakeGain_;
+            out[i * 2 + 1] *= self->vadWakeGain_;
         }
     }
 
