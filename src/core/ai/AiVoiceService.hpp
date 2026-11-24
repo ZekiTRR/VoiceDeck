@@ -32,7 +32,14 @@ public:
     void unload();
 
     // Worker thread only. Returns false when no voice is ready.
-    bool tryConvert(const float* context16k, float pitchShift, float* output, ConverterShape& shape);
+    bool tryConvert(const float* context16k, float pitchShift, float* output, ConverterShape& shape,
+                    bool lowPriority = false);
+    // FX Send yields to queued microphone inference so a continuous soundboard
+    // cannot starve the live voice on a shared GPU/converter.
+    void setMicrophonePriority(bool active) {
+        microphonePriority_.store(active, std::memory_order_release);
+    }
+    bool microphonePriority() const { return microphonePriority_.load(std::memory_order_acquire); }
 
     // Worker thread only.
     bool currentShape(ConverterShape& out);
@@ -56,6 +63,7 @@ private:
     std::unique_ptr<RvcRuntime> runtime_;
     std::unique_ptr<RvcConverter> converter_;
     std::atomic<bool> ready_{false};
+    std::atomic<bool> microphonePriority_{false};
     AiProvider hint_ = AiProvider::Auto;
     AiVoiceInfo lastVoice_;
     bool hasLastVoice_ = false;

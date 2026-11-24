@@ -23,6 +23,8 @@ constexpr std::size_t kFadeRampFrames = 960;
 void AudioEngine::setLatencyMode(int mode) {
     if (mode < 0 || mode > 2) mode = 0;
     latencyMode_.store(mode, std::memory_order_relaxed);
+    voice_.setLatencyMode(mode);
+    fxVoice_.setLatencyMode(mode);
 }
 
 void AudioEngine::setVadThresholdDb(float db) {
@@ -34,11 +36,18 @@ AudioEngine::AudioEngine(const SoundBank& bank)
     : bank_(bank),
       aiLib_(Settings::appDataDir() / "AiVoice"),
       aiService_(aiLib_),
-      aiStage_(int(kSampleRate), int(kMaxBlockFrames), aiControls_, aiService_) {
+      aiStage_(int(kSampleRate), int(kMaxBlockFrames), aiControls_, aiService_),
+      fxAiStage_(int(kSampleRate), int(kMaxBlockFrames), fxAiControls_, aiService_, true) {
     // Fixed enhancement: 85 Hz rumble cut. Shelves/dynamics follow the
     // active preset (configureEnhancement).
-    for (int c = 0; c < 2; ++c) enhHpf_[c].setup(double(kSampleRate), 85.0, 0.707);
+    for (int c = 0; c < 2; ++c) {
+        enhHpf_[c].setup(double(kSampleRate), 85.0, 0.707);
+        fxEnhHpf_[c].setup(double(kSampleRate), 55.0, 0.707);
+    }
     enhDyn_.configure(double(kSampleRate), kMaxBlockFrames, 2);
+    fxEnhDyn_.configure(double(kSampleRate), kMaxBlockFrames, 2);
+    fxEnhDyn_.gate.limitDb = -80.0;
+    fxAiControls_.autoLimit.store(false, std::memory_order_relaxed);
 }
 
 AudioEngine::~AudioEngine() { shutdown(); }
@@ -185,9 +194,15 @@ bool AudioEngine::start(std::size_t captureIdx, std::size_t playbackIdx, std::st
     duck_ = 1.0f;
     vadQuietFrames_ = 0;
     vadSleepState_ = false;
+    vadPhraseActive_ = false;
     vadWakeGain_ = 0.0f;
     vadSleeping_.store(false, std::memory_order_relaxed);
     aiControls_.sleeping.store(false, std::memory_order_relaxed);
+    fxAiControls_.sleeping.store(true, std::memory_order_relaxed);
+    fxSoundTailFrames_ = 0;
+    fxAiTailFrames_ = 0;
+    fxSendGain_ = 0.0f;
+    ambient_.reset();
     capOverflows_.store(0, std::memory_order_relaxed);
     micUnderruns_.store(0, std::memory_order_relaxed);
     playbackMaxFrames_.store(0, std::memory_order_relaxed);
@@ -311,22 +326,25 @@ void AudioEngine::stopMonitor() {
     curMonitorIdx_ = std::size_t(-1);
 }
 
-void AudioEngine::drainCommands(int timeoutMs) {
+bool AudioEngine::drainCommands(int timeoutMs) {
+    std::lock_guard<std::recursive_mutex> lock(controlMtx_);
+    if (!isRunning()) return true; // no callback can hold a preset reference
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
     auto remaining = [&]() {
         return std::chrono::steady_clock::now() < deadline;
     };
     // 1. Wait until the dispatcher moved everything into the audio ring.
     while (!queue_.idle()) {
-        if (!remaining()) return;
+        if (!remaining()) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     // 2. Wait for one more audio block so the playback callback consumed it.
     const std::uint64_t ticks = playTicks_.load(std::memory_order_relaxed);
     while (playTicks_.load(std::memory_order_relaxed) == ticks) {
-        if (!remaining()) return;
+        if (!remaining()) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    return true;
 }
 
 std::string AudioEngine::currentCaptureName() const {
@@ -419,10 +437,38 @@ void AudioEngine::playbackDataCb(ma_device* pDevice, void* pOutput, const void* 
             case Command::Type::SetDucking:
                 self->ducking_.store(cmd.value != 0.0f, std::memory_order_relaxed);
                 break;
+            case Command::Type::SetAmbient:
+                self->ambientOn_.store(cmd.value != 0.0f, std::memory_order_relaxed);
+                break;
+            case Command::Type::SetAmbientPreset:
+                if (cmd.soundId < self->presets_.size() && self->voice_.matchesPreset(int(cmd.soundId))) {
+                    std::shared_ptr<const Sound> clip;
+                    if (cmd.soundId < self->presetAmbients_.size())
+                        clip = self->presetAmbients_[cmd.soundId];
+                    self->ambient_.configure(int(cmd.value), cmd.valueB, std::move(clip));
+                }
+                break;
+            case Command::Type::SetSoundFx:
+                self->soundFxSend_.store(cmd.value != 0.0f, std::memory_order_relaxed);
+                if (cmd.value == 0.0f) {
+                    self->fxAiControls_.sleeping.store(true, std::memory_order_relaxed);
+                    self->fxAiStage_.notifyWorker();
+                    self->fxSoundTailFrames_ = 0;
+                    self->fxAiTailFrames_ = 0;
+                    self->fxVoice_.resetTail(); // do not resume stale FX tails on re-enable
+                }
+                break;
             case Command::Type::SetPreset:
                 if (cmd.soundId < self->presets_.size()) {
-                    self->configureEnhancement(self->presets_[cmd.soundId]);
-                    self->voice_.applyPreset(int(cmd.soundId), self->presets_[cmd.soundId]);
+                    const VoicePreset& p = self->presets_[cmd.soundId];
+                    self->configureEnhancement(p);
+                    self->configureFxEnhancement(p);
+                    self->voice_.applyPreset(int(cmd.soundId), p);
+                    self->fxVoice_.applyPreset(int(cmd.soundId), p);
+                    std::shared_ptr<const Sound> clip;
+                    if (cmd.soundId < self->presetAmbients_.size())
+                        clip = self->presetAmbients_[cmd.soundId];
+                    self->ambient_.configure(p, std::move(clip));
                 }
                 break;
             case Command::Type::SetDsp:
@@ -430,15 +476,19 @@ void AudioEngine::playbackDataCb(ma_device* pDevice, void* pOutput, const void* 
                 break;
             case Command::Type::SetTransposeOverride:
                 self->voice_.setTransposeOverride(cmd.value, cmd.soundId != 0);
+                self->fxVoice_.setTransposeOverride(cmd.value, cmd.soundId != 0);
                 break;
             case Command::Type::SetFormantOverride:
                 self->voice_.setFormantOverride(cmd.value, cmd.soundId != 0);
+                self->fxVoice_.setFormantOverride(cmd.value, cmd.soundId != 0);
                 break;
             case Command::Type::SetAi:
                 self->aiControls_.enabled.store(cmd.value != 0.0f, std::memory_order_relaxed);
+                self->fxAiControls_.enabled.store(cmd.value != 0.0f, std::memory_order_relaxed);
                 break;
             case Command::Type::SetAiPitch:
                 self->aiControls_.pitchShift.store(cmd.value, std::memory_order_relaxed);
+                self->fxAiControls_.pitchShift.store(cmd.value, std::memory_order_relaxed);
                 break;
             case Command::Type::PreviewSound: {
                 // VoiceMixer only understands PlaySound - convert.
@@ -484,6 +534,9 @@ void AudioEngine::playbackDataCb(ma_device* pDevice, void* pOutput, const void* 
         for (std::size_t i = 0; i < n; ++i) sum += double(self->micBlock_[i]) * double(self->micBlock_[i]);
         const double rms = std::sqrt(sum / double(n));
         const float wakeThr = thr * 1.58489319f; // +4 dB hysteresis
+        if ((!self->vadSleepState_ && rms >= double(thr)) ||
+            (self->vadSleepState_ && rms > double(wakeThr)))
+            self->vadPhraseActive_ = true;
         bool sleep = self->vadSleepState_;
         if (rms < double(thr)) {
             self->vadQuietFrames_ += frames;
@@ -499,6 +552,7 @@ void AudioEngine::playbackDataCb(ma_device* pDevice, void* pOutput, const void* 
             self->vadSleeping_.store(sleep, std::memory_order_relaxed);
             self->aiControls_.sleeping.store(sleep, std::memory_order_relaxed);
             if (sleep) {
+                self->vadPhraseActive_ = false;
                 self->voice_.resetTail(); // drop stale reverb/delay tails
                 self->aiStage_.notifyWorker(); // worker drains input/output and resets
             }
@@ -524,6 +578,9 @@ void AudioEngine::playbackDataCb(ma_device* pDevice, void* pOutput, const void* 
             // Stage-2b core: enhanced -> AI (48k -> 16k -> model -> back)
             //            -> character chain.
             self->aiStage_.processStereo(self->enhBlock_, self->aiBlock_, frames);
+            if (!self->aiControls_.enabled.load(std::memory_order_relaxed) &&
+                self->fxAiControls_.enabled.load(std::memory_order_relaxed))
+                self->fxAiControls_.enabled.store(false, std::memory_order_relaxed);
             self->voice_.process(self->aiBlock_, self->dspBlock_, frames);
             const float f = self->dspFade_;
             const float d = 1.0f - f;
@@ -545,13 +602,87 @@ void AudioEngine::playbackDataCb(ma_device* pDevice, void* pOutput, const void* 
         }
     }
 
-    // 4. Soundboard, ducked under speech if enabled.
-    //    NaN scrubber: zero any bad sample before it poisons the mix.
+    // 4. Soundboard, ducked under speech if enabled. Render into its own block
+    //    first: FX Send must never share Stretch/reverb/AI state with the mic.
     for (std::size_t i = 0; i < frames * kChannels; ++i) {
         if (std::isnan(out[i]) || std::isinf(out[i])) out[i] = 0.0f;
     }
     const float duck = self->duckingStep(frames);
-    self->mixer_.mix(out, frames, kChannels, duck);
+    std::memset(self->soundBlock_, 0, frames * kChannels * sizeof(float));
+    self->mixer_.mix(self->soundBlock_, frames, kChannels, 1.0f);
+
+    const float fxTarget = self->soundFxSend_.load(std::memory_order_relaxed) ? 1.0f : 0.0f;
+    // Time-based ramp works for 256/480/960-frame callbacks alike; a single
+    // HQ block must not snap the send fully on or off.
+    const float fxStep = 1.0f - std::exp(-float(frames) / (0.010f * float(kSampleRate)));
+    self->fxSendGain_ += (fxTarget - self->fxSendGain_) * fxStep;
+    if (self->fxSendGain_ < 0.001f && fxTarget == 0.0f) self->fxSendGain_ = 0.0f;
+
+    if (self->fxSendGain_ > 0.001f) {
+        float peak = 0.0f;
+        for (std::size_t i = 0; i < frames * kChannels; ++i) {
+            const float a = std::fabs(self->soundBlock_[i]);
+            if (a > peak) peak = a;
+            if (std::isnan(self->soundBlock_[i]) || std::isinf(self->soundBlock_[i]))
+                self->soundBlock_[i] = 0.0f;
+        }
+        // Let long cave/reverb/delay tails finish after a clip, but put the
+        // extra RVC worker back to sleep much sooner to avoid idle GPU work.
+        const std::uint64_t kVoiceTailFrames = std::max<std::uint64_t>(
+            std::uint64_t(kSampleRate) / 5,
+            std::uint64_t(self->fxVoice_.tailSeconds() * double(kSampleRate)) +
+                std::uint64_t(kSampleRate) / 4);
+        constexpr std::uint64_t kAiTailFrames = std::uint64_t(kSampleRate) * 3 / 10;
+        const bool hasSignal = peak > 0.00001f;
+        self->fxSoundTailFrames_ = hasSignal
+                                       ? kVoiceTailFrames
+                                       : (self->fxSoundTailFrames_ > frames
+                                              ? self->fxSoundTailFrames_ - frames
+                                              : 0);
+        self->fxAiTailFrames_ = hasSignal
+                                    ? kAiTailFrames
+                                    : (self->fxAiTailFrames_ > frames
+                                           ? self->fxAiTailFrames_ - frames
+                                           : 0);
+        const bool fxActive = self->fxSoundTailFrames_ > 0;
+        const bool fxAiSleeping = self->fxAiTailFrames_ == 0;
+        if (self->fxAiControls_.sleeping.load(std::memory_order_relaxed) != fxAiSleeping) {
+            self->fxAiControls_.sleeping.store(fxAiSleeping, std::memory_order_relaxed);
+            self->fxAiStage_.notifyWorker();
+        }
+        if (fxActive) {
+            self->processFxEnhancement(self->soundBlock_, self->fxEnhBlock_, frames);
+            self->fxAiStage_.processStereo(self->fxEnhBlock_, self->fxAiBlock_, frames);
+            self->fxVoice_.process(self->fxAiBlock_, self->fxDspBlock_, frames);
+        } else {
+            std::memset(self->fxDspBlock_, 0, frames * kChannels * sizeof(float));
+        }
+        const float wet = self->fxSendGain_;
+        const float dry = 1.0f - wet;
+        for (std::size_t i = 0; i < frames * kChannels; ++i)
+            out[i] += (self->soundBlock_[i] * dry + self->fxDspBlock_[i] * wet) * duck;
+    } else {
+        if (!self->fxAiControls_.sleeping.load(std::memory_order_relaxed)) {
+            self->fxAiControls_.sleeping.store(true, std::memory_order_relaxed);
+            self->fxAiStage_.notifyWorker();
+        }
+        for (std::size_t i = 0; i < frames * kChannels; ++i) out[i] += self->soundBlock_[i] * duck;
+    }
+
+    // 4b. Preset ambience follows the existing mic VAD, never the soundboard.
+    //     It is therefore silent in the channel between phrases.
+    {
+        std::memset(self->ambientBlock_, 0, frames * kChannels * sizeof(float));
+        const bool speechActive = self->vadPhraseActive_ && !self->vadSleepState_;
+        const bool ambientSystemOn = self->ambientOn_.load(std::memory_order_relaxed) &&
+                                      self->bypassEnabled() &&
+                                      self->dspOn_.load(std::memory_order_relaxed);
+        self->ambient_.process(self->ambientBlock_, frames, speechActive, ambientSystemOn);
+        for (std::size_t i = 0; i < frames * kChannels; ++i) out[i] += self->ambientBlock_[i];
+    }
+    // Final guard after soundboard FX and custom ambience joins.
+    for (std::size_t i = 0; i < frames * kChannels; ++i)
+        if (std::isnan(out[i]) || std::isinf(out[i])) out[i] = 0.0f;
 
     // 5. Preview sounds (monitor/original output only, not the main cable).
     std::memset(self->previewBlock_, 0, frames * kChannels * sizeof(float));
@@ -597,6 +728,7 @@ void AudioEngine::monitorDataCb(ma_device* pDevice, void* pOutput, const void* /
 void AudioEngine::configureEnhancement(const VoicePreset& p) {
     static constexpr double kEqFreq[8] = {200.0, 400.0, 800.0, 1600.0,
                                           3200.0, 6400.0, 10000.0, 12000.0};
+    const bool engineEq = !usesExplicitChain(p);
     for (int c = 0; c < 2; ++c) {
         enhShelfHigh_[c].setup(double(kSampleRate), 3500.0, 4.0 * double(p.timbre));
         enhShelfLow_[c].setup(double(kSampleRate), 250.0, -2.0 * double(p.timbre));
@@ -604,7 +736,7 @@ void AudioEngine::configureEnhancement(const VoicePreset& p) {
     // Hand-rolled RBJ peaking biquads (same formula as VoiceMixer - stable).
     for (int b = 0; b < 8; ++b) {
         const float gain = std::max(-12.0f, std::min(12.0f, p.eq[b]));
-        eqGains_[b] = gain;
+        eqGains_[b] = engineEq ? gain : 0.0f;
         for (int c = 0; c < 2; ++c) {
             const double A = std::pow(10.0, gain / 40.0);
             const double w = 2.0 * 3.14159265358979 * kEqFreq[b] / double(kSampleRate);
@@ -635,6 +767,89 @@ void AudioEngine::configureEnhancement(const VoicePreset& p) {
         enhDyn_.compressor.autoGain = 1;
     } else {
         enhDyn_.compressor.invRatio = 1.0; // 1:1 = off
+    }
+}
+
+void AudioEngine::configureFxEnhancement(const VoicePreset& p) {
+    static constexpr double kEqFreq[8] = {200.0, 400.0, 800.0, 1600.0,
+                                          3200.0, 6400.0, 10000.0, 12000.0};
+    const bool engineEq = !usesExplicitChain(p);
+    for (int c = 0; c < 2; ++c) {
+        fxEnhShelfHigh_[c].setup(double(kSampleRate), 3500.0, 4.0 * double(p.timbre));
+        fxEnhShelfLow_[c].setup(double(kSampleRate), 250.0, -2.0 * double(p.timbre));
+    }
+    for (int b = 0; b < 8; ++b) {
+        const float gain = std::max(-12.0f, std::min(12.0f, p.eq[b]));
+        fxEqGains_[b] = engineEq ? gain : 0.0f;
+        for (int c = 0; c < 2; ++c) {
+            const double A = std::pow(10.0, gain / 40.0);
+            const double w = 2.0 * 3.14159265358979 * kEqFreq[b] / double(kSampleRate);
+            const double cw = std::cos(w);
+            const double sw = std::sin(w);
+            const double alpha = sw / (2.0 * 0.9);
+            const double a0 = 1.0 + alpha / A;
+            fxEqCoef_[b][c][0] = float((1.0 + alpha * A) / a0);
+            fxEqCoef_[b][c][1] = float((-2.0 * cw) / a0);
+            fxEqCoef_[b][c][2] = float((1.0 - alpha * A) / a0);
+            fxEqCoef_[b][c][3] = float((-2.0 * cw) / a0);
+            fxEqCoef_[b][c][4] = float((1.0 - alpha / A) / a0);
+            for (int k = 0; k < 3; ++k) {
+                fxEqX_[b][c][k] = 0.0f;
+                fxEqY_[b][c][k] = 0.0f;
+            }
+        }
+    }
+    // Music/memes must not be cut by the microphone noise gate.
+    fxEnhDyn_.gate.limitDb = -80.0;
+    fxEnhDyn_.compressor.limitDb = -18.0;
+    fxEnhDyn_.compressor.invRatio = p.comp ? 0.5f : 1.0f;
+    fxEnhDyn_.compressor.autoGain = p.comp ? 1 : 0;
+}
+
+void AudioEngine::processFxEnhancement(const float* in, float* out, std::size_t frames) {
+    if (frames > kMaxBlockFrames) {
+        std::memcpy(out, in, frames * kChannels * sizeof(float));
+        return;
+    }
+    for (std::size_t i = 0; i < frames; ++i) {
+        double l = fxEnhHpf_[0].filter(double(in[i * 2]));
+        l = fxEnhShelfLow_[0].filter(l);
+        l = fxEnhShelfHigh_[0].filter(l);
+        for (int b = 0; b < 8; ++b) {
+            if (fxEqGains_[b] == 0.0f) continue;
+            const float* c = fxEqCoef_[b][0];
+            float* xh = fxEqX_[b][0];
+            float* yh = fxEqY_[b][0];
+            const float y = c[0] * float(l) + c[1] * xh[0] + c[2] * xh[1] -
+                            c[3] * yh[0] - c[4] * yh[1];
+            xh[1] = xh[0]; xh[0] = float(l);
+            yh[1] = yh[0]; yh[0] = y;
+            l = y;
+        }
+        enhL_[i] = float(std::isnan(l) || std::isinf(l) ? 0.0 : l);
+
+        double r = fxEnhHpf_[1].filter(double(in[i * 2 + 1]));
+        r = fxEnhShelfLow_[1].filter(r);
+        r = fxEnhShelfHigh_[1].filter(r);
+        for (int b = 0; b < 8; ++b) {
+            if (fxEqGains_[b] == 0.0f) continue;
+            const float* c = fxEqCoef_[b][1];
+            float* xh = fxEqX_[b][1];
+            float* yh = fxEqY_[b][1];
+            const float y = c[0] * float(r) + c[1] * xh[0] + c[2] * xh[1] -
+                            c[3] * yh[0] - c[4] * yh[1];
+            xh[1] = xh[0]; xh[0] = float(r);
+            yh[1] = yh[0]; yh[0] = y;
+            r = y;
+        }
+        enhR_[i] = float(std::isnan(r) || std::isinf(r) ? 0.0 : r);
+    }
+    float* inBufs[2] = {enhL_, enhR_};
+    float* outBufs[2] = {enhOutL_, enhOutR_};
+    fxEnhDyn_.process(inBufs, outBufs, frames);
+    for (std::size_t i = 0; i < frames; ++i) {
+        out[i * 2] = enhOutL_[i];
+        out[i * 2 + 1] = enhOutR_[i];
     }
 }
 

@@ -9,13 +9,26 @@
 #include <cctype>
 #include <cmath>
 #include <fstream>
+#include <new>
 
 namespace vd {
 
 namespace {
+constexpr double kAmbientMaxSeconds = 120.0;
+constexpr std::uint64_t kAmbientMaxFileBytes = std::uint64_t(256) * 1024 * 1024;
+
 std::string toLower(std::string s) {
     for (char& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
     return s;
+}
+
+void readModuleParams(const nlohmann::json& j, VoicePreset& p) {
+    p.moduleParams.clear();
+    if (!j.is_object()) return;
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        if (!isVoiceLabModule(it.key())) continue;
+        p.moduleParams[it.key()] = readVoiceLabParams(it.value(), it.key());
+    }
 }
 
 std::size_t findByName(const std::vector<DeviceEntry>& devs, const std::string& name) {
@@ -99,9 +112,17 @@ void App::init() {
         if (hadFile) {
             for (const VoicePreset& lp : loaded) {
                 if (!lp.custom) {
-                    // Keep only the user's hotkey binding for a built-in.
+                    // Factory voice parameters stay locked, but hotkeys and
+                    // the independently editable ambience are user settings.
                     for (VoicePreset& p : presets)
-                        if (p.name == lp.name) { p.hotkey = lp.hotkey; break; }
+                        if (p.name == lp.name) {
+                            p.hotkey = lp.hotkey;
+                            if (lp.ambientExplicit) {
+                                p.ambient = lp.ambient;
+                                p.ambientGain = lp.ambientGain;
+                            }
+                            break;
+                        }
                     continue;
                 }
                 presets.push_back(lp); // custom character — preserved verbatim
@@ -113,6 +134,7 @@ void App::init() {
 
     if (!engine.init())
         log::error("failed to initialize audio context (WASAPI)");
+    rebuildEngineAmbients();
     std::string err;
     if (!engine.refreshDevices(err)) log::warn("device enumeration failed: %s", err.c_str());
 
@@ -184,6 +206,18 @@ void App::init() {
         c.value = duckingOn ? 1.f : 0.f;
         engine.submit(c);
     }
+    {
+        Command c;
+        c.type = Command::Type::SetAmbient;
+        c.value = settings.ambientEnabled ? 1.f : 0.f;
+        engine.submit(c);
+    }
+    {
+        Command c;
+        c.type = Command::Type::SetSoundFx;
+        c.value = settings.soundFxSend ? 1.f : 0.f;
+        engine.submit(c);
+    }
     if (!presets.empty()) {
         Command c;
         c.type = Command::Type::SetPreset;
@@ -199,6 +233,13 @@ void App::applyAiSettings() {
     c.fadeMs.store(std::max(1, settings.aiFadeMs));
     c.autoLimit.store(settings.aiAutoLimit);
     c.flapLimit.store(std::max(1, settings.aiFlapLimit));
+    auto& fx = engine.fxAiControls();
+    fx.primeMarginMs.store(std::max(0, settings.aiPrimeMarginMs));
+    fx.fadeMs.store(std::max(1, settings.aiFadeMs));
+    fx.autoLimit.store(false); // a busy soundboard must not disable mic AI
+    fx.flapLimit.store(std::max(1, settings.aiFlapLimit));
+    fx.pitchShift.store(c.pitchShift.load(std::memory_order_relaxed));
+    fx.enabled.store(c.enabled.load(std::memory_order_relaxed));
     AiProvider p;
     if (!ParseAiProvider(settings.aiProvider, p)) p = AiProvider::Auto;
     engine.aiService().setProviderHint(p);
@@ -234,6 +275,7 @@ void App::startHotkeyService() {
                         break;
                     }
                     engine.aiControls().enabled.store(!engine.aiEnabled());
+                    engine.fxAiControls().enabled.store(engine.aiControls().enabled.load());
                     log::info("AI voice: %s (hotkey)", engine.aiEnabled() ? "ON" : "OFF");
                     if (onHotkeyEvent) onHotkeyEvent("aiChanged");
                     break;
@@ -328,11 +370,12 @@ std::string App::removeSound(std::uint64_t id) {
         if (s->id != id && normKey(s->path) == key) { shared = true; break; }
     }
 
+    auto controlLock = engine.lockControl();
     Command stop;
     stop.type = Command::Type::StopSound;
     stop.soundId = id;
     engine.submit(stop);
-    engine.drainCommands();
+    if (!engine.drainCommands()) return "audio engine busy - try again in a second";
     for (const auto& v : engine.mixer().snapshot())
         if (v.soundId == id) return "clip is playing - try again in a second";
     std::string err = bank.remove(id);
@@ -462,12 +505,14 @@ std::string App::editSound(std::uint64_t id, const nlohmann::json& def) {
     const Sound* victim = bank.find(id);
     if (!victim) return "no sound with id " + std::to_string(id);
 
-    // Never mutate PCM while the audio callback may be reading it.
+    // Never mutate PCM while the audio callback may be reading it. Exclude new
+    // hotkey plays across stop + drain + the in-place PCM rebuild.
+    auto controlLock = engine.lockControl();
     Command stop;
     stop.type = Command::Type::StopSound;
     stop.soundId = id;
     engine.submit(stop);
-    engine.drainCommands();
+    if (!engine.drainCommands()) return "аудиодвижок занят — повтори попытку";
     for (const auto& v : engine.mixer().snapshot())
         if (v.soundId == id) return "звук ещё играет — останови его и повтори";
 
@@ -559,10 +604,11 @@ bool App::maybeElevate(const std::string& args) {
 
 bool App::applyPreset(int idx) {
     if (idx < 0 || std::size_t(idx) >= presets.size()) return false;
+    auto controlLock = engine.lockControl();
     // Selecting a different character drops any temporary live override so
     // factory values are heard again when that character is picked later.
     if (livePresetIndex_ >= 0 && livePresetIndex_ != idx) {
-        engine.drainCommands();
+        if (!engine.drainCommands()) return false;
         engine.setPresets(presets);
         livePresetIndex_ = -1;
     }
@@ -599,6 +645,151 @@ void App::setDucking(bool on) {
     engine.submit(c);
     settings.ducking = on;
     settings.save(settingsFile);
+}
+
+std::string App::setAmbientEnabled(bool on) {
+    settings.ambientEnabled = on;
+    settings.save(settingsFile);
+    Command c;
+    c.type = Command::Type::SetAmbient;
+    c.value = on ? 1.f : 0.f;
+    engine.submit(c);
+    return "";
+}
+
+std::string App::setSoundFxSend(bool on) {
+    settings.soundFxSend = on;
+    settings.save(settingsFile);
+    Command c;
+    c.type = Command::Type::SetSoundFx;
+    c.value = on ? 1.f : 0.f;
+    engine.submit(c);
+    return "";
+}
+
+std::shared_ptr<const Sound> App::loadAmbientClip(const std::string& key, std::string& err) {
+    auto it = ambientCache_.find(key);
+    if (it != ambientCache_.end()) return it->second;
+    if (key.rfind("ambiences/", 0) != 0 || key.find("..") != std::string::npos) {
+        err = "эмбиент не найден";
+        return {};
+    }
+    std::error_code ec;
+    const std::filesystem::path file = dataDir / std::filesystem::path(key);
+    if (!std::filesystem::is_regular_file(file, ec)) {
+        err = "эмбиент не найден";
+        return {};
+    }
+    try {
+        auto loaded = std::make_shared<Sound>();
+        if (!Sound::loadFromFile(*loaded, 0, file, AudioEngine::kSampleRate,
+                                 AudioEngine::kChannels, err,
+                                 kAmbientMaxSeconds, kAmbientMaxFileBytes))
+            return {};
+        ambientCache_[key] = loaded;
+        return loaded;
+    } catch (const std::bad_alloc&) {
+        err = "недостаточно памяти для эмбиента";
+        return {};
+    }
+}
+
+std::string App::setPresetAmbient(int idx, const nlohmann::json& def) {
+    if (idx < 0 || std::size_t(idx) >= presets.size()) return "нет такого персонажа";
+    std::string ambient = def.value("ambient", presets[std::size_t(idx)].ambient);
+    if (ambient != "none" && ambient != "radio" && ambient != "pilot" &&
+        ambient != "cave") {
+        std::string err;
+        if (!loadAmbientClip(ambient, err)) return err;
+    }
+    const float gain = float(std::max(0.0, std::min(1.0, def.value("gain", double(presets[std::size_t(idx)].ambientGain)))));
+    auto controlLock = engine.lockControl();
+    if (!engine.drainCommands()) return "аудиодвижок занят — повтори попытку";
+
+    auto live = livePresetIndex_ >= 0 ? engine.presets() : presets;
+    const VoicePreset previous = presets[std::size_t(idx)];
+    live[std::size_t(idx)].ambient = ambient;
+    live[std::size_t(idx)].ambientGain = gain;
+    live[std::size_t(idx)].ambientExplicit = true;
+    presets[std::size_t(idx)].ambient = ambient;
+    presets[std::size_t(idx)].ambientGain = gain;
+    presets[std::size_t(idx)].ambientExplicit = true;
+    if (!rebuildEngineAmbients()) {
+        presets[std::size_t(idx)] = previous;
+        return "аудиодвижок занят — повтори попытку";
+    }
+    engine.setPresets(std::move(live));
+    if (!savePresets(charactersFile, presets)) return "не удалось сохранить персонажа";
+    // Ambient-only edits must not activate a character or restart its voice
+    // crossfade. The callback updates AmbientPlayer only if this preset is
+    // already active (or is the pending crossfade target).
+    Command c;
+    c.type = Command::Type::SetAmbientPreset;
+    c.soundId = std::uint64_t(idx);
+    c.value = float(ambientKindCode(ambient));
+    c.valueB = gain;
+    engine.submit(c);
+    return "";
+}
+
+std::string App::importAmbient(int idx, const std::filesystem::path& path) {
+    if (idx < 0 || std::size_t(idx) >= presets.size()) return "нет такого персонажа";
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec)) return "файл эмбиента не найден";
+    const auto sourceBytes = std::filesystem::file_size(path, ec);
+    if (!ec && sourceBytes > kAmbientMaxFileBytes) return "аудиофайл слишком большой";
+
+    const std::filesystem::path dir = dataDir / "ambiences";
+    std::filesystem::create_directories(dir, ec);
+    if (ec) return "не удалось создать папку ambiences: " + ec.message();
+    std::filesystem::path dst = dir / path.filename();
+    int n = 2;
+    while (std::filesystem::exists(dst, ec)) {
+        dst = dir / (path.stem().string() + " (" + std::to_string(n++) + ")" +
+                     path.extension().string());
+    }
+    std::filesystem::copy_file(path, dst, std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec) return "не удалось скопировать эмбиент: " + ec.message();
+
+    const std::string key = "ambiences/" + dst.filename().string();
+    std::string err;
+    if (!loadAmbientClip(key, err)) {
+        std::filesystem::remove(dst, ec);
+        return err;
+    }
+    const float gain = presets[std::size_t(idx)].ambientGain;
+    const std::string setErr = setPresetAmbient(idx, {{"ambient", key}, {"gain", gain}});
+    if (!setErr.empty()) {
+        ambientCache_.erase(key);
+        std::filesystem::remove(dst, ec);
+        return setErr;
+    }
+    log::info("custom ambience assigned to '%s': %s", presets[std::size_t(idx)].name.c_str(),
+              key.c_str());
+    return "";
+}
+
+bool App::rebuildEngineAmbients() {
+    if (engine.isRunning() && !engine.drainCommands()) return false;
+    std::vector<std::shared_ptr<const Sound>> slots;
+    slots.reserve(presets.size());
+    for (const VoicePreset& p : presets) {
+        std::shared_ptr<const Sound> clip;
+        if (p.ambient.rfind("ambiences/", 0) == 0) {
+            auto it = ambientCache_.find(p.ambient);
+            if (it != ambientCache_.end()) {
+                clip = it->second;
+            } else {
+                std::string err;
+                clip = loadAmbientClip(p.ambient, err);
+                if (!clip)
+                    log::warn("ambience '%s' not loaded: %s", p.ambient.c_str(), err.c_str());
+            }
+        }
+        slots.push_back(std::move(clip));
+    }
+    engine.setPresetAmbients(std::move(slots));
+    return true;
 }
 
 void App::setPitchOverride(float semi, bool on) {
@@ -675,12 +866,15 @@ void App::setAiPitch(float semi) {
 
 void App::setAiMargin(int ms) {
     engine.aiControls().primeMarginMs.store(std::max(0, std::min(1000, ms)));
+    engine.fxAiControls().primeMarginMs.store(engine.aiControls().primeMarginMs.load());
     settings.aiPrimeMarginMs = engine.aiControls().primeMarginMs.load();
     settings.save(settingsFile);
+    engine.notifyAiWorker();
 }
 
 void App::setAiFade(int ms) {
     engine.aiControls().fadeMs.store(std::max(1, std::min(1000, ms)));
+    engine.fxAiControls().fadeMs.store(engine.aiControls().fadeMs.load());
     settings.aiFadeMs = engine.aiControls().fadeMs.load();
     settings.save(settingsFile);
 }
@@ -807,16 +1001,39 @@ int App::addPreset(const nlohmann::json& def, std::string& err) {
             p.eq[i] = clampf(def["eq"][std::size_t(i)].get<double>(), -12, 12);
     }
     if (def.contains("chain") && def["chain"].is_array()) {
-        for (const auto& c : def["chain"])
-            if (c.is_string()) p.chain.push_back(c.get<std::string>());
+        for (const auto& c : def["chain"]) {
+            if (!c.is_string() || p.chain.size() >= 16) continue;
+            std::string item = toLower(c.get<std::string>());
+            if (isChainModule(item)) p.chain.push_back(std::move(item));
+        }
     }
+    if (def.contains("moduleParams")) readModuleParams(def["moduleParams"], p);
+    p.chainExplicit = def.value("chainExplicit", false) || hasVoiceLabChain(p.chain);
+    p.ambient = def.value("ambient", std::string("none"));
+    if (p.ambient.size() > 260 || p.ambient.find("..") != std::string::npos) p.ambient = "none";
+    if (p.ambient != "none" && p.ambient != "radio" && p.ambient != "pilot" &&
+        p.ambient != "cave" && p.ambient.rfind("ambiences/", 0) != 0)
+        p.ambient = "none";
+    p.ambientGain = clampf(def.value("ambientGain", 0.18), 0.0, 1.0);
+    p.ambientExplicit = true;
     p.custom = true;
 
-    // Mutation protocol: no preset command may be in flight while the audio
-    // thread reads the vector; drain first, then swap the copy in.
-    engine.drainCommands();
+    // Mutation protocol: exclude all command producers, drain the callback,
+    // then swap the copy in while the same control lock remains held.
+    auto controlLock = engine.lockControl();
+    if (!engine.drainCommands()) {
+        err = "аудиодвижок занят — повтори попытку";
+        return -1;
+    }
+    const int previousLive = livePresetIndex_;
     livePresetIndex_ = -1; // a live override must not leak into the new list
     presets.push_back(p);
+    if (!rebuildEngineAmbients()) {
+        presets.pop_back();
+        livePresetIndex_ = previousLive;
+        err = "аудиодвижок занят — повтори попытку";
+        return -1;
+    }
     engine.setPresets(presets);
     savePresets(charactersFile, presets);
     log::info("preset added: '%s' (index %zu)", p.name.c_str(), presets.size() - 1);
@@ -827,28 +1044,38 @@ std::string App::removePreset(int idx) {
     if (idx <= 0 || std::size_t(idx) >= presets.size())
         return "этот персонаж нельзя удалить";
     if (!presets[std::size_t(idx)].custom) return "встроенные персонажи защищены";
-    engine.drainCommands();
-    livePresetIndex_ = -1;
+    auto controlLock = engine.lockControl();
+    if (!engine.drainCommands()) return "аудиодвижок занят — повтори попытку";
+    const int previousLive = livePresetIndex_;
 
     // Capture hotkeys by old index, unbind the stale tail, rebind shifted.
     const auto combos = hotkeys.allPresetCombos();
     const std::size_t oldSize = presets.size();
+    auto previous = presets;
     std::vector<VoicePreset> next;
     next.reserve(oldSize - 1);
     for (std::size_t i = 0; i < oldSize; ++i)
         if (int(i) != idx) next.push_back(presets[i]);
-    for (std::size_t i = next.size(); i < oldSize; ++i)
+    presets = std::move(next);
+    if (!rebuildEngineAmbients()) {
+        presets = std::move(previous);
+        livePresetIndex_ = previousLive;
+        return "аудиодвижок занят — повтори попытку";
+    }
+    livePresetIndex_ = -1;
+    for (std::size_t i = presets.size(); i < oldSize; ++i)
         hotkeys.unbindPreset(i); // stale bindings beyond the shrunken list
     for (const auto& [oldIdx, combo] : combos) {
         if (int(oldIdx) == idx) continue;
         const std::size_t ni = (oldIdx > std::size_t(idx)) ? oldIdx - 1 : oldIdx;
         hotkeys.bindPreset(ni, combo);
     }
-    presets = std::move(next);
     engine.setPresets(presets);
     savePresets(charactersFile, presets);
-    // If the removed character was active, fall back to "None".
-    if (engine.voicePresetIndex() == idx) applyPreset(0);
+    // Keep the same character active when removal shifts its index.
+    const int active = engine.voicePresetIndex();
+    if (active == idx) applyPreset(0);
+    else if (active > idx) applyPreset(active - 1);
     log::info("preset removed (was index %d)", idx);
     return "";
 }
@@ -943,11 +1170,12 @@ std::pair<std::size_t, std::size_t> App::refreshSounds() {
         engine.submit(stopPreview);
     }
     for (const Stale& s : stale) {
+        auto controlLock = engine.lockControl();
         Command stop;
         stop.type = Command::Type::StopSound;
         stop.soundId = s.id;
         engine.submit(stop);
-        engine.drainCommands();
+        if (!engine.drainCommands()) continue; // retry on the next refresh
         bool playing = false;
         for (const auto& v : engine.mixer().snapshot())
             if (v.soundId == s.id) { playing = true; break; }
@@ -983,19 +1211,23 @@ std::pair<std::size_t, std::size_t> App::refreshSounds() {
 }
 
 std::string App::setLatencyMode(int mode) {
+    auto controlLock = engine.lockControl();
     if (mode < 0 || mode > 2) mode = 0;
+    const bool running = engine.isRunning();
+    const std::size_t cap = engine.currentCaptureIdx();
+    const std::size_t play = engine.currentPlaybackIdx();
+    // Stretch reconfiguration allocates/resets internal STFT buffers. Stop
+    // the callback first instead of racing it from the settings/UI thread.
+    if (running && cap != std::size_t(-1) && play != std::size_t(-1)) {
+        engine.stopMonitor();
+        engine.stopDevices();
+    }
     engine.setLatencyMode(mode);
     settings.latencyMode = mode;
     settings.save(settingsFile);
-    // Restart devices with the new WASAPI period if the engine is running.
-    if (engine.isRunning()) {
-        const std::size_t cap = engine.currentCaptureIdx();
-        const std::size_t play = engine.currentPlaybackIdx();
-        if (cap != std::size_t(-1) && play != std::size_t(-1)) {
-            std::string err;
-            engine.stopMonitor();
-            engine.start(cap, play, err);
-        }
+    if (running && cap != std::size_t(-1) && play != std::size_t(-1)) {
+        std::string err;
+        if (!engine.start(cap, play, err)) log::warn("latency restart failed: %s", err.c_str());
     }
     return "";
 }
@@ -1006,7 +1238,11 @@ void App::applyLivePreset(int idx, const VoicePreset& modified) {
     // addPreset() and removePreset() can never persist a live tweak.
     auto live = presets;
     live[std::size_t(idx)] = modified;
-    engine.drainCommands();
+    auto controlLock = engine.lockControl();
+    if (!engine.drainCommands()) {
+        log::warn("live preset update skipped: audio engine busy");
+        return;
+    }
     engine.setPresets(std::move(live));
     livePresetIndex_ = idx;
     applyPreset(idx);
@@ -1026,13 +1262,26 @@ void App::liveUpdatePreset(int idx, const nlohmann::json& def) {
     if (def.contains("formant")) p.formant = clampf(def["formant"].get<double>(), -24, 24);
     if (def.contains("timbre")) p.timbre = clampf(def["timbre"].get<double>(), -1, 1);
     if (def.contains("strength")) p.strength = clampf(def["strength"].get<double>(), 0, 1);
+    if (def.contains("lfoRate")) p.lfoRate = clampf(def["lfoRate"].get<double>(), 0, 10);
+    if (def.contains("lfoDepth")) p.lfoDepth = clampf(def["lfoDepth"].get<double>(), 0, 12);
+    if (def.contains("gate")) p.gate = def["gate"].get<bool>();
+    if (def.contains("comp")) p.comp = def["comp"].get<bool>();
     if (def.contains("space")) p.space = def["space"].get<std::string>();
     if (def.contains("effect")) p.effect = def["effect"].get<std::string>();
     if (def.contains("chain") && def["chain"].is_array()) {
         p.chain.clear();
-        for (const auto& c : def["chain"])
-            if (c.is_string()) p.chain.push_back(c.get<std::string>());
+        for (const auto& c : def["chain"]) {
+            if (!c.is_string() || p.chain.size() >= 16) continue;
+            std::string item = toLower(c.get<std::string>());
+            if (isChainModule(item)) p.chain.push_back(std::move(item));
+        }
     }
+    if (def.contains("moduleParams")) readModuleParams(def["moduleParams"], p);
+    if (def.contains("chainExplicit")) p.chainExplicit = def["chainExplicit"].get<bool>();
+    if (hasVoiceLabChain(p.chain)) p.chainExplicit = true;
+    if (def.contains("ambient")) p.ambient = def["ambient"].get<std::string>();
+    if (def.contains("ambientGain"))
+        p.ambientGain = clampf(def["ambientGain"].get<double>(), 0, 1);
     if (def.contains("eq") && def["eq"].is_array()) {
         for (int i = 0; i < 8 && std::size_t(i) < def["eq"].size(); ++i)
             p.eq[i] = clampf(def["eq"][std::size_t(i)].get<double>(), -12, 12);
@@ -1106,8 +1355,39 @@ nlohmann::json App::statusJson() const {
     j["dspOn"] = engine.dspOn();
     j["bypassOn"] = engine.bypassEnabled();
     j["duckingOn"] = engine.duckingOn();
+    // These toggles are persisted synchronously; reporting Settings avoids a
+    // one-callback race where a UI refresh could briefly show the old value.
+    j["ambientOn"] = settings.ambientEnabled;
+    j["soundFxSend"] = settings.soundFxSend;
     j["monitorOn"] = engine.monitorRunning();
     j["preset"] = engine.voicePresetIndex();
+
+    // Custom ambience library for the preset editor. Files are discovered in
+    // the portable folder even when no preset currently references them.
+    std::vector<std::string> ambientKeys;
+    for (const auto& [key, clip] : ambientCache_) {
+        (void)clip;
+        ambientKeys.push_back(key);
+    }
+    std::error_code ambientEc;
+    const std::filesystem::path ambientDir = dataDir / "ambiences";
+    if (std::filesystem::is_directory(ambientDir, ambientEc)) {
+        for (const auto& entry : std::filesystem::directory_iterator(ambientDir, ambientEc)) {
+            if (ambientEc) break;
+            std::error_code fileEc;
+            if (!entry.is_regular_file(fileEc)) continue;
+            const std::string ext = toLower(entry.path().extension().string());
+            if (ext == ".wav" || ext == ".mp3" || ext == ".flac" || ext == ".ogg" ||
+                ext == ".opus" || ext == ".m4a" || ext == ".aac")
+                ambientKeys.push_back("ambiences/" + entry.path().filename().string());
+        }
+    }
+    std::sort(ambientKeys.begin(), ambientKeys.end());
+    ambientKeys.erase(std::unique(ambientKeys.begin(), ambientKeys.end()), ambientKeys.end());
+    nlohmann::json ambientsArr = nlohmann::json::array();
+    for (const std::string& key : ambientKeys)
+        ambientsArr.push_back({{"id", key}, {"name", std::filesystem::path(key).stem().string()}});
+    j["ambients"] = std::move(ambientsArr);
 
     nlohmann::json presetsArr = nlohmann::json::array();
     const auto presetCombos = hotkeys.allPresetCombos();
@@ -1130,6 +1410,15 @@ nlohmann::json App::statusJson() const {
         nlohmann::json chainArr = nlohmann::json::array();
         for (const auto& c : presets[i].chain) chainArr.push_back(c);
         p["chain"] = std::move(chainArr);
+        p["chainExplicit"] = presets[i].chainExplicit || hasVoiceLabChain(presets[i].chain);
+        nlohmann::json moduleParams = nlohmann::json::object();
+        for (const auto& [name, params] : presets[i].moduleParams)
+            if (isVoiceLabModule(name)) moduleParams[name] = writeVoiceLabParams(params);
+        p["moduleParams"] = std::move(moduleParams);
+        p["gate"] = presets[i].gate;
+        p["comp"] = presets[i].comp;
+        p["ambient"] = presets[i].ambient;
+        p["ambientGain"] = double(presets[i].ambientGain);
         p["hotkey"] = (presetCombos.count(i)) ? presetCombos.at(i) : presets[i].hotkey;
         presetsArr.push_back(std::move(p));
     }

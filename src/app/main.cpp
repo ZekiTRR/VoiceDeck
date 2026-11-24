@@ -18,6 +18,7 @@
 #include <cstring>
 #include <deque>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -99,6 +100,9 @@ void printHelp() {
     vd::log::info("  admin on|off                 always run as administrator (UAC relaunch)");
     vd::log::info("  bypass on|off                voice path on/off (clip output continues)");
     vd::log::info("  ducking on|off               auto-lower clips while you speak");
+    vd::log::info("  ambient on|off               VAD-gated preset background ambiences");
+    vd::log::info("  ambient <idx> <none|radio|pilot|cave|file>");
+    vd::log::info("  fxsend on|off                route soundboard through current voice/RVC");
     vd::log::info("  vad <-60..-20>               voice-branch silence threshold (dBFS)");
     vd::log::info("  presets                      list voice characters");
     vd::log::info("  preset <name|index>          apply a voice character");
@@ -181,6 +185,9 @@ void printStatus(App& app) {
                   app.engine.bypassEnabled() ? "ON" : "OFF",
                   app.engine.duckingOn() ? "ON" : "OFF",
                   app.engine.monitorRunning() ? "on" : "off");
+    vd::log::info("ambient   : %s   soundboard FX Send: %s",
+                  app.engine.ambientEnabled() ? "ON" : "OFF",
+                  app.engine.soundFxSend() ? "ON" : "OFF");
     vd::log::info("VAD       : %.0f dBFS, voice branch %s", double(app.engine.vadThresholdDb()),
                   app.engine.vadSleeping() ? "SLEEPING" : "awake");
     const auto clips = app.bank.snapshot();
@@ -252,10 +259,12 @@ bool handleCommand(App& app, const std::string& raw, bool& quit) {
         return true;
     }
     if (c == "status") {
+        app.engine.drainCommands();
         printStatus(app);
         return true;
     }
     if (c == "presets" || c == "characters") {
+        app.engine.drainCommands();
         printPresets(app);
         return true;
     }
@@ -523,6 +532,41 @@ bool handleCommand(App& app, const std::string& raw, bool& quit) {
         const bool on = (t.size() >= 2) ? (toLower(t[1]) == "on") : !app.duckingOn;
         app.setDucking(on);
         vd::log::info("ducking: %s", app.engine.duckingOn() ? "ON" : "OFF");
+        return true;
+    }
+    if (c == "ambient") {
+        if (t.size() == 2 && (toLower(t[1]) == "on" || toLower(t[1]) == "off")) {
+            const bool on = toLower(t[1]) == "on";
+            const std::string err = app.setAmbientEnabled(on);
+            if (!err.empty()) vd::log::error("ambient: %s", err.c_str());
+            else vd::log::info("ambient master: %s", on ? "ON" : "OFF");
+            return true;
+        }
+        if (t.size() < 3) {
+            vd::log::warn("usage: ambient on|off | ambient <idx> <none|radio|pilot|cave|file>");
+            return true;
+        }
+        const int idx = int(parseId(t[1]));
+        if (idx < 0 || std::size_t(idx) >= app.presets.size()) {
+            vd::log::error("ambient: bad character index");
+            return true;
+        }
+        const std::string kind = toLower(t[2]);
+        std::string err;
+        if (kind == "none" || kind == "radio" || kind == "pilot" || kind == "cave")
+            err = app.setPresetAmbient(idx, {{"ambient", kind}});
+        else
+            err = app.importAmbient(idx, fs::path(t[2]));
+        if (!err.empty()) vd::log::error("ambient: %s", err.c_str());
+        else vd::log::info("ambient for '%s': %s", app.presets[std::size_t(idx)].name.c_str(),
+                           app.presets[std::size_t(idx)].ambient.c_str());
+        return true;
+    }
+    if (c == "fxsend") {
+        const bool on = (t.size() >= 2) ? (toLower(t[1]) == "on") : !app.settings.soundFxSend;
+        const std::string err = app.setSoundFxSend(on);
+        if (!err.empty()) vd::log::error("fxsend: %s", err.c_str());
+        else vd::log::info("soundboard FX Send: %s", on ? "ON" : "OFF");
         return true;
     }
     if (c == "vad") {
@@ -854,7 +898,10 @@ int main(int argc, char** argv) {
     const bool cliMode = (argc > 1 && std::strcmp(argv[1], "--cli") == 0);
     vd::log::info("VoiceDeck 1.2.0 - Soundpad + Voicemod (DSP + AI), C++20");
 
-    App app;
+    // The engine owns several independent, fixed-size DSP chains. Keep the
+    // facade off the default 1 MB thread stack (CLI and UI both enter here).
+    auto appOwner = std::make_unique<App>();
+    App& app = *appOwner;
     app.cliMode = cliMode;
     // When "always run as administrator" is enabled, hand off to an elevated
     // copy before initializing the audio engine (avoids a double init).

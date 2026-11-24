@@ -14,6 +14,9 @@ struct Settings {
     std::string monitorDevice; // exact device name, "" = monitor off
     bool bypass = true;
     bool ducking = false;
+    // VAD-gated preset ambiences and soundboard -> current voice/RVC routing.
+    bool ambientEnabled = true;
+    bool soundFxSend = false;
 
     // AI voice tuning (detailed settings, persisted).
     std::string aiProvider = "auto"; // auto | cuda | dml | cpu

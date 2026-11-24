@@ -107,6 +107,7 @@ private:
     void onNavigationCompleted();
     void handleMessage(const std::string& json);
     void openAddSoundDialog();
+    void openAmbientDialog(int presetIdx);
     void openPthDialog();
     void convertPth(const nlohmann::json& j);
 
@@ -577,6 +578,39 @@ void UiApp::openAddSoundDialog() {
     pushState();
 }
 
+void UiApp::openAmbientDialog(int presetIdx) {
+    IFileOpenDialog* dlg = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&dlg)))) {
+        notify("Не удалось открыть диалог выбора эмбиента");
+        return;
+    }
+    {
+        COMDLG_FILTERSPEC filters[] = {
+            {L"Audio (WAV, MP3, FLAC, OGG)", L"*.wav;*.mp3;*.flac;*.ogg;*.opus;*.m4a"},
+            {L"All files", L"*.*"},
+        };
+        dlg->SetFileTypes(2, filters);
+        dlg->SetOptions(FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_FILEMUSTEXIST);
+        dlg->SetTitle(L"Выберите фоновый эмбиент для персонажа");
+    }
+    if (SUCCEEDED(dlg->Show(hwnd_))) {
+        IShellItem* item = nullptr;
+        if (SUCCEEDED(dlg->GetResult(&item)) && item) {
+            PWSTR path = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
+                const std::string err = app_.importAmbient(presetIdx, utf16ToUtf8(path));
+                if (!err.empty()) notify(err);
+                else notify("Эмбиент назначен персонажу");
+                CoTaskMemFree(path);
+            }
+            item->Release();
+        }
+    }
+    dlg->Release();
+    pushState();
+}
+
 void UiApp::openPthDialog() {
     IFileOpenDialog* dlg = nullptr;
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
@@ -797,6 +831,28 @@ void UiApp::handleMessage(const std::string& jsonText) {
     if (cmd == "duckingOn") {
         app_.setDucking(j.value("on", true));
         pushMeters();
+        return;
+    }
+    if (cmd == "ambientOn") {
+        const std::string err = app_.setAmbientEnabled(j.value("on", true));
+        if (!err.empty()) notify(err);
+        pushState();
+        return;
+    }
+    if (cmd == "soundFxSend") {
+        const std::string err = app_.setSoundFxSend(j.value("on", false));
+        if (!err.empty()) notify(err);
+        pushState();
+        return;
+    }
+    if (cmd == "setPresetAmbient") {
+        const std::string err = app_.setPresetAmbient(j.value("idx", -1), j);
+        if (!err.empty()) notify(err);
+        pushMeters();
+        return;
+    }
+    if (cmd == "ambientFileDialog") {
+        openAmbientDialog(j.value("idx", -1));
         return;
     }
     if (cmd == "vadThreshold") {

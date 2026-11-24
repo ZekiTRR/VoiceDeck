@@ -68,7 +68,8 @@ struct Sound {
     // device rate, cache in RAM" pipeline for the soundboard. The audio
     // callback never touches decoders or resamplers.
     static bool loadFromFile(Sound& out, std::uint64_t id, const std::filesystem::path& path,
-                             std::uint32_t sampleRate, std::uint32_t channels, std::string& err);
+                             std::uint32_t sampleRate, std::uint32_t channels, std::string& err,
+                             double maxDurationSec = 0.0, std::uint64_t maxFileBytes = 0);
 };
 
 } // namespace vd

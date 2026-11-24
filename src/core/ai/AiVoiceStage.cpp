@@ -11,8 +11,8 @@
 namespace vd {
 
 AiVoiceStage::AiVoiceStage(int sampleRate, int maxBlockFrames, Controls& controls,
-                           AiVoiceService& service)
-    : rate_(sampleRate), controls_(controls), service_(service) {
+                           AiVoiceService& service, bool lowPriority)
+    : rate_(sampleRate), lowPriority_(lowPriority), controls_(controls), service_(service) {
     wet_.resize(std::size_t(maxBlockFrames));
     monoIn_.resize(std::size_t(maxBlockFrames));
     monoDry_.resize(std::size_t(maxBlockFrames));
@@ -21,7 +21,8 @@ AiVoiceStage::AiVoiceStage(int sampleRate, int maxBlockFrames, Controls& control
     state_ = std::make_unique<WorkerState>(rate_);
     worker_ = std::thread([this] { workerLoop(); });
     // Never REALTIME: the AI worker must not starve the UI or games.
-    SetThreadPriority(worker_.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
+    SetThreadPriority(worker_.native_handle(),
+                      lowPriority_ ? THREAD_PRIORITY_NORMAL : THREAD_PRIORITY_ABOVE_NORMAL);
 }
 
 AiVoiceStage::~AiVoiceStage() {
@@ -130,9 +131,18 @@ void AiVoiceStage::process(float* mono, std::size_t frames) {
     }
 
     if (active_) {
-        input_.write(mono, frames);
-        notifyWorker();
         quietSamples_ = isQuiet(mono, frames) ? quietSamples_ + std::int64_t(frames) : 0;
+        if (input_.space() < frames) {
+            // Never enqueue a partial callback block: that desynchronises the
+            // resampler and model timeline. Drop the whole block and re-prime.
+            output_.discard(output_.available());
+            resetRequested_.store(true, std::memory_order_relaxed);
+            primed_ = false;
+            onUnderrun();
+        } else {
+            input_.write(mono, frames);
+        }
+        notifyWorker();
     }
 
     std::fill(wet_.begin(), wet_.begin() + std::ptrdiff_t(frames), 0.0f);
@@ -262,13 +272,24 @@ void AiVoiceStage::workerLoop() {
             maxBuffered_.store(prime + blockDeviceSamples_ * 2, std::memory_order_relaxed);
         }
 
+        if (lowPriority_ && service_.microphonePriority()) continue;
+        if (!lowPriority_) service_.setMicrophonePriority(true);
         std::size_t read;
         while ((read = input_.read(chunk.data(), chunk.size())) > 0) {
+            if (controls_.sleeping.load(std::memory_order_relaxed)) break;
             state_->pushInput(chunk.data(), int(read));
+            bool blocked = false;
             while (state_->hasBlock()) {
+                if (controls_.sleeping.load(std::memory_order_relaxed)) {
+                    blocked = true;
+                    break;
+                }
                 const float shift = controls_.pitchShift.load(std::memory_order_relaxed);
                 const auto t0 = std::chrono::steady_clock::now();
-                if (!state_->convertBlock(service_, shift)) break;
+                if (!state_->convertBlock(service_, shift, lowPriority_)) {
+                    blocked = true;
+                    break;
+                }
                 const double dt =
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
                         .count();
@@ -276,7 +297,13 @@ void AiVoiceStage::workerLoop() {
                 ++convCount_;
                 if (convCount_ % 50 == 0)
                     log::info("AI inference: %.0f ms avg per 100 ms block", convMs_);
-                output_.write(state_->deviceOutput(), std::size_t(state_->deviceCount()));
+                const std::size_t deviceCount = std::size_t(state_->deviceCount());
+                if (output_.space() >= deviceCount)
+                    output_.write(state_->deviceOutput(), deviceCount);
+                else {
+                    output_.discard(output_.available());
+                    resetRequested_.store(true, std::memory_order_relaxed);
+                }
 
                 // The audio thread flipped the auto-off latch after audible
                 // dropouts; report it once from this (non-audio) thread.
@@ -288,7 +315,9 @@ void AiVoiceStage::workerLoop() {
                               controls_.primeMarginMs.load(std::memory_order_relaxed) + 100);
                 }
             }
+            if (blocked) break;
         }
+        if (!lowPriority_) service_.setMicrophonePriority(false);
     }
 }
 
@@ -307,6 +336,7 @@ bool AiVoiceStage::WorkerState::configure(const ConverterShape& shape) {
     const int resampledLen = StreamResampler::MaxOutputLength(maxIn, double(deviceRate_) / kWorkerSampleRate) + 8;
     resampled_.assign(std::size_t(resampledLen), 0.0f);
     context_.assign(std::size_t(shape.contextSamples16k), 0.0f);
+    candidateContext_.assign(std::size_t(shape.contextSamples16k), 0.0f);
     pending_.assign(std::size_t(shape.blockSamples16k) * 4 + std::size_t(resampledLen), 0.0f);
     converted_.assign(std::size_t(shape.outputSamples), 0.0f);
     block_.assign(std::size_t(shape.blockOutputSamples()), 0.0f);
@@ -364,23 +394,28 @@ void AiVoiceStage::WorkerState::pushInput(const float* samples, int count) {
     pendingCount_ += produced;
 }
 
-bool AiVoiceStage::WorkerState::convertBlock(AiVoiceService& service, float pitchShift) {
+bool AiVoiceStage::WorkerState::convertBlock(AiVoiceService& service, float pitchShift,
+                                              bool lowPriority) {
     const int block = shape_.blockSamples16k;
-    // Shift the context window: drop the oldest `block`, append the newest.
-    std::memmove(context_.data(), context_.data() + block,
+    // Build a candidate context without consuming the pending block. A
+    // low-priority FX request can be denied by microphone arbitration; retrying
+    // must then see exactly the same audio and context.
+    std::memmove(candidateContext_.data(), context_.data() + block,
                  (context_.size() - std::size_t(block)) * sizeof(float));
-    std::memcpy(context_.data() + context_.size() - std::size_t(block), pending_.data(),
+    std::memcpy(candidateContext_.data() + candidateContext_.size() - std::size_t(block),
+                pending_.data(),
                  std::size_t(block) * sizeof(float));
-    std::memmove(pending_.data(), pending_.data() + block,
-                 std::size_t(pendingCount_ - block) * sizeof(float));
-    pendingCount_ -= block;
 
     ConverterShape got;
-    if (!service.tryConvert(context_.data(), pitchShift, converted_.data(), got) ||
+    if (!service.tryConvert(candidateContext_.data(), pitchShift, converted_.data(), got, lowPriority) ||
         !(got == shape_)) {
         deviceCount_ = 0;
         return false;
     }
+    context_.swap(candidateContext_);
+    std::memmove(pending_.data(), pending_.data() + block,
+                 std::size_t(pendingCount_ - block) * sizeof(float));
+    pendingCount_ -= block;
 
     // Crossfade the overlap with the previous block's tail, then emit one block.
     const int margin = shape_.marginSamples;

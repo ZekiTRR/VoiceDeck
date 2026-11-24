@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -50,6 +51,14 @@ struct App {
     void setSoundLoop(std::uint64_t id, bool on);
     // Voice-activity gate threshold (-60..-20 dBFS); persists to settings.
     std::string setVadThresholdDb(float db);
+    // Global VAD-gated ambience master and soundboard FX Send.
+    std::string setAmbientEnabled(bool on);
+    std::string setSoundFxSend(bool on);
+    // Persists ambience selection/gain for any character, including factory
+    // characters (their voice parameters remain factory-locked).
+    std::string setPresetAmbient(int idx, const nlohmann::json& def);
+    // Copies/decodes a custom loop into data\ambiences and assigns it to idx.
+    std::string importAmbient(int idx, const std::filesystem::path& path);
 
     // --- tags ---------------------------------------------------------------
     // `tags` is a JSON array of strings. Persists to sounds.json immediately.
@@ -151,9 +160,14 @@ struct App {
     int livePresetIndex_ = -1;
 
 private:
+    std::shared_ptr<const Sound> loadAmbientClip(const std::string& key, std::string& err);
+    bool rebuildEngineAmbients();
     // Sound hotkey combos loaded from sounds.json (restored once the hotkey
     // service is up).
     std::map<std::uint64_t, std::string> soundCombos_;
+    // Portable custom ambience PCM. Keys are "ambiences/<filename>"; entries
+    // stay alive for the engine's shared_ptr snapshot even after a file swap.
+    std::map<std::string, std::shared_ptr<const Sound>> ambientCache_;
 };
 
 } // namespace vd

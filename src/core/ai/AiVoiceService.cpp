@@ -106,8 +106,10 @@ void AiVoiceService::unloadLocked() {
 }
 
 bool AiVoiceService::tryConvert(const float* context16k, float pitchShift, float* output,
-                                ConverterShape& shape) {
+                                ConverterShape& shape, bool lowPriority) {
+    if (lowPriority && microphonePriority()) return false;
     std::lock_guard<std::mutex> lk(sync_);
+    if (lowPriority && microphonePriority()) return false;
     if (!converter_ || !ready_.load(std::memory_order_relaxed)) return false;
     shape = converter_->shape();
     converter_->convert(context16k, pitchShift, output);

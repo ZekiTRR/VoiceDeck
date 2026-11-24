@@ -13,7 +13,10 @@
 - **Audio editor** — quick trim, global gain and per-region gain changes right in the app. Edits are non-destructive: the source file stays untouched, parameters live in `sounds.json`.
 - **Windows startup** — launch with Windows and an "always run as administrator" mode (UAC relaunch).
 - **Low latency & idle** — 256/480/960 buffer modes, an adaptive jitter buffer for virtual-cable clock drift, VAD sleep for the voice branch (the soundboard keeps playing) with AI pre-roll, and a zero-latency soft clipper. The silence threshold is adjustable on the Voice tab.
-- **45 voice characters** — pitch, formant, timbre, 8-band EQ, effect chains (radio → robot → cave), live editing with "Save as New".
+- **45 voice characters** — pitch, formant, timbre and 8-band EQ. Legacy chains such as `radio → robot → cave` remain supported.
+- **VoiceLab** — a visual chain builder with Pitch, Formant, Vocoder, Bitcrusher, Ring Modulator, Distortion, Chorus, Reverb, Delay and 8-band EQ. Add, remove and drag modules; every module has independent Strength/Mix, frequency, drive, depth, decay, feedback and other controls. Changes are live; "Save as New" persists them in a new character.
+- **Background ambiences** — VAD-gated radio static with an end-of-phrase chirp, cockpit hum and cave wind. Toggle them globally, assign one to any character, or import a custom seamless loop.
+- **Soundboard FX Send** — route songs and memes through the current voice preset and loaded RVC voice. Mic and soundboard use independent DSP/AI paths; simultaneous RVC work always prioritizes the live microphone.
 - **AI voice** — RVC v2 via ONNX Runtime (DirectML / CUDA / CPU), ~45–290 ms depending on model and GPU. Built-in `.pth` converter right from the UI.
 - **Devices** — mic and virtual cable selection, monitoring, latency mode, global hotkeys.
 - **No allocations or locks in the audio callback** — lock-free SPSC rings and atomics.
@@ -42,9 +45,10 @@ Or run `voicedeck.exe --cli` for the headless console mode with the same feature
 data\
   settings.json     devices, latency, AI tuning, hotkeys
   sounds.json       sound library: tags, hotkeys and audio-editor settings (trimStart/trimEnd/gain/regions)
-  characters.json   voice characters
+  characters.json   voice characters, VoiceLab chains and ambiences
   sounds\           clips (added files are copied here)
   AiVoice\          content_encoder.onnx, rmvpe.onnx, voices\*.onnx + *.json
+  ambiences\        custom background loops (up to 120 seconds)
 ```
 
 ## AI voice

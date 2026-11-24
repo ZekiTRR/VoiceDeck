@@ -37,7 +37,8 @@ public:
         std::atomic<bool> sleeping{false};
     };
 
-    AiVoiceStage(int sampleRate, int maxBlockFrames, Controls& controls, AiVoiceService& service);
+    AiVoiceStage(int sampleRate, int maxBlockFrames, Controls& controls, AiVoiceService& service,
+                 bool lowPriority = false);
     ~AiVoiceStage();
     AiVoiceStage(const AiVoiceStage&) = delete;
     AiVoiceStage& operator=(const AiVoiceStage&) = delete;
@@ -93,7 +94,7 @@ private:
         void seedContext(const float* samples16k, int count);
         void pushInput(const float* samples, int count);
         bool hasBlock() const { return pendingCount_ >= shape_.blockSamples16k && shape_.blockSamples16k > 0; }
-        bool convertBlock(AiVoiceService& service, float pitchShift);
+        bool convertBlock(AiVoiceService& service, float pitchShift, bool lowPriority);
         const float* deviceOutput() const { return deviceOut_.data(); }
         int deviceCount() const { return deviceCount_; }
 
@@ -104,6 +105,7 @@ private:
         std::unique_ptr<StreamResampler> toDevice_;
         std::vector<float> resampled_;
         std::vector<float> context_;
+        std::vector<float> candidateContext_;
         std::vector<float> pending_;
         int pendingCount_ = 0;
         std::vector<float> converted_;
@@ -116,6 +118,7 @@ private:
     };
 
     int rate_ = 48000;
+    bool lowPriority_ = false;
     Controls& controls_;
     AiVoiceService& service_;
 

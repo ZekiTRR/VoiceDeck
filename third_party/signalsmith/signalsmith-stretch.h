@@ -80,7 +80,7 @@ struct SignalsmithStretch {
 		bands = int(stft.bands());
 		_channelBands.assign(bands*channels, Band());
 		
-		peaks.reserve(bands/2);
+		peaks.reserve(bands); // worst-case peak count for odd FFT band sizes
 		energy.resize(bands);
 		smoothedEnergy.resize(bands);
 		outputMap.resize(bands);

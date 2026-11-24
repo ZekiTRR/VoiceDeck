@@ -38,6 +38,7 @@ add_executable(voicedeck
     src/ui/UiApp.cpp
     src/core/engine/AudioEngine.cpp
     src/core/dsp/VoiceProcessor.cpp
+    src/core/dsp/AmbientPlayer.cpp
     src/core/ai/Ort.cpp
     src/core/ai/VoiceLibrary.cpp
     src/core/ai/RvcConverter.cpp

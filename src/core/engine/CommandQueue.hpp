@@ -21,6 +21,9 @@ struct Command {
         SetSoundLoop,   // value != 0 -> loop next plays
         SetBypass,      // value != 0 -> mic passthrough on
         SetDucking,     // value != 0 -> duck soundboard under speech
+        SetAmbient,     // value != 0 -> VAD-gated preset ambience master
+        SetAmbientPreset, // soundId=index, value=kind, valueB=gain
+        SetSoundFx,     // value != 0 -> soundboard through current voice/RVC
         SetPreset,      // soundId = voice preset index
         SetDsp,         // value != 0 -> voice DSP chain on
         SetTransposeOverride, // value = semitones, soundId != 0 -> enable
@@ -83,7 +86,8 @@ public:
     // callback (call drainCommands() on the engine for the full guarantee).
     bool idle() const {
         std::lock_guard<std::mutex> lk(mtx_);
-        return inbox_.empty() && ring_.available() == 0;
+        return !dispatching_.load(std::memory_order_acquire) && inbox_.empty() &&
+               ring_.available() == 0;
     }
 
 private:
@@ -98,12 +102,17 @@ private:
                 if (quit_.load(std::memory_order_relaxed)) return;
                 if (inbox_.empty()) continue;
                 c = inbox_.front();
+                dispatching_.store(true, std::memory_order_release);
                 inbox_.pop_front();
             }
             while (!ring_.push(c)) {
-                if (quit_.load(std::memory_order_relaxed)) return;
+                if (quit_.load(std::memory_order_relaxed)) {
+                    dispatching_.store(false, std::memory_order_release);
+                    return;
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
+            dispatching_.store(false, std::memory_order_release);
         }
     }
 
@@ -113,6 +122,7 @@ private:
     SpscQueue<Command> ring_{256}; // dispatcher -> audio callback
     std::thread dispatcher_;
     std::atomic<bool> quit_{false};
+    std::atomic<bool> dispatching_{false};
 };
 
 } // namespace vd

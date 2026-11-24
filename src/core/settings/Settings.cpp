@@ -33,6 +33,8 @@ bool Settings::load(const std::filesystem::path& file) {
         monitorDevice = j.value("monitorDevice", "");
         bypass = j.value("bypass", true);
         ducking = j.value("ducking", false);
+        ambientEnabled = j.value("ambientEnabled", true);
+        soundFxSend = j.value("soundFxSend", false);
         aiProvider = j.value("aiProvider", "auto");
         aiPrimeMarginMs = j.value("aiPrimeMarginMs", 20);
         aiFadeMs = j.value("aiFadeMs", 30);
@@ -57,6 +59,8 @@ bool Settings::save(const std::filesystem::path& file) const {
     j["monitorDevice"] = monitorDevice;
     j["bypass"] = bypass;
     j["ducking"] = ducking;
+    j["ambientEnabled"] = ambientEnabled;
+    j["soundFxSend"] = soundFxSend;
     j["aiProvider"] = aiProvider;
     j["aiPrimeMarginMs"] = aiPrimeMarginMs;
     j["aiFadeMs"] = aiFadeMs;

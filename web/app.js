@@ -22,6 +22,7 @@ const ICONS={
   volume:`<svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4Z"/><path d="M16.5 9a4 4 0 0 1 0 6"/></svg>`,
   keyboard:`<svg viewBox="0 0 24 24"><path d="M5 6h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Z"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/></svg>`,
   tag:`<svg viewBox="0 0 24 24"><path d="M12.5 3H4v8.5L12.5 20 20 12.5 12.5 3Z"/><path d="M7.5 7.5h.01"/></svg>`,
+  settings:`<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>`,
 };
 function presetIcon(name){
   const k=String(name).toLowerCase();
@@ -47,6 +48,7 @@ function presetIcon(name){
 let S=null,tab="voice",hkTarget=null;
 const playingIds=new Set(),pausedIds=new Set(),previewIds=new Set();
 let soundView="grid",searchQuery="",settingsRenderedOnce=false,editingPreset=-1,editorDismissed=false;
+let editorChain=[],editorChainExplicit=false,editorChainDirty=false,editorModuleParams={},editingModuleId=null,chainDragIndex=-1,ambientTimer=null;
 let activeTag=null;                 // selected tag filter chip
 let tagState=null;                  // {id, tags} for the tag dialog
 let editState=null;                 // audio editor working copy
@@ -58,6 +60,119 @@ const TITLES={voice:"Голосовые эффекты",sounds:"Саундбор
 const EQ_FREQS=[200,400,800,1600,3200,6400,10000,12000];
 const SPACE_OPTS=["none","room","hall","cave","helmet","radio","megaphone"];
 const EFFECT_OPTS=["none","robot","alien","atari","clone","silence"];
+const LAB_MODULES=[
+  {id:"pitch",label:"Pitch",desc:"транспозиция",icon:"M3 12h4l3-7 4 14 3-7h4"},
+  {id:"formant",label:"Formant",desc:"форма резонанса",icon:"M4 15V9m4 9V6m4 13V5m4 13V6m4 9V9"},
+  {id:"vocoder",label:"Vocoder",desc:"8 полос",icon:"M4 6v12m4-9v6m4-12v18m4-14v10m4-7v4"},
+  {id:"bitcrusher",label:"Bitcrusher",desc:"6-bit / downsample",icon:"M3 12h3l2-6 3 12 3-12 3 12 2-6h2"},
+  {id:"ringmod",label:"Ring Modulator",desc:"несущая 110 Hz",icon:"M3 12c3-8 6-8 9 0s6 8 9 0M3 12c3 8 6 8 9 0s6-8 9 0"},
+  {id:"distortion",label:"Distortion",desc:"сатурация",icon:"M3 17c4 0 3-10 7-10s3 10 7 10 3-6 4-6"},
+  {id:"chorus",label:"Chorus",desc:"модулированная задержка",icon:"M3 8c3-5 6 5 9 0s6 5 9 0M3 16c3-5 6 5 9 0s6 5 9 0"},
+  {id:"reverb",label:"Reverb",desc:"пространство",icon:"M4 17V8l4-3 4 3v9M14 17V5l3-2 3 2v12M4 20h16"},
+  {id:"delay",label:"Delay",desc:"feedback echo",icon:"M4 8h10a4 4 0 0 1 0 8H9M4 8l3-3M4 8l3 3M9 16l-3 3M9 16l-3-3"},
+  {id:"eq",label:"8-band EQ",desc:"8 полос эквалайзера",icon:"M4 18v-5m4 5V8m4 10V5m4 13V9m4 9v-6"},
+];
+const LEGACY_CHAIN={
+  room:["Room","реверберация"],hall:["Hall","реверберация"],cave:["Cave","пещера"],
+  helmet:["Helmet","фильтр + реверберация"],radio:["Radio","полосовой фильтр + сатурация"],
+  megaphone:["Megaphone","мегафон"],robot:["Robot","comb + ring mod"],alien:["Alien","ring mod"],
+  atari:["Atari","bitcrush"],clone:["Clone","двойный голос"],silence:["Silence","тишина"],
+};
+const MODULE_PARAM_DEFS={
+  pitch:[
+    {key:"value",label:"Полутона",min:-24,max:24,step:1,unit:" st"},
+    {key:"value2",label:"Глубина вибрато",min:0,max:12,step:.1,unit:" st"},
+    {key:"value3",label:"Скорость вибрато",min:0,max:10,step:.1,unit:" Hz"},
+  ],
+  formant:[
+    {key:"value",label:"Форманта",min:-24,max:24,step:1,unit:" st"},
+    {key:"value2",label:"База форманты",min:70,max:250,step:1,unit:" Hz"},
+  ],
+  vocoder:[
+    {key:"value",label:"Несущая",min:30,max:500,step:1,unit:" Hz"},
+    {key:"value2",label:"Атака",min:1,max:50,step:1,unit:" ms"},
+    {key:"value3",label:"Отпускание",min:10,max:500,step:5,unit:" ms"},
+  ],
+  bitcrusher:[
+    {key:"value",label:"Битность",min:2,max:12,step:1,unit:" bit"},
+    {key:"value2",label:"Даунсэмплинг",min:.1,max:1,step:.05,unit:"%",percent:true},
+  ],
+  ringmod:[
+    {key:"value",label:"Частота",min:20,max:1200,step:1,unit:" Hz"},
+    {key:"value2",label:"Глубина",min:0,max:1,step:.01,unit:"%",percent:true},
+  ],
+  distortion:[{key:"value",label:"Drive",min:0,max:1,step:.01,unit:"%",percent:true}],
+  chorus:[
+    {key:"value",label:"Rate",min:.05,max:5,step:.01,unit:" Hz"},
+    {key:"value2",label:"Depth",min:0,max:20,step:.1,unit:" ms"},
+    {key:"value3",label:"Базовая задержка",min:8,max:50,step:1,unit:" ms"},
+  ],
+  reverb:[
+    {key:"value",label:"Decay",min:.1,max:6,step:.1,unit:" s"},
+    {key:"value2",label:"Size",min:.1,max:1,step:.01,unit:"%",percent:true},
+    {key:"value3",label:"Damping",min:0,max:1,step:.01,unit:"%",percent:true},
+  ],
+  delay:[
+    {key:"value",label:"Время",min:20,max:800,step:10,unit:" ms"},
+    {key:"value2",label:"Feedback",min:0,max:.9,step:.01,unit:"%",percent:true},
+  ],
+  eq:[],
+};
+function defaultModuleParams(id){
+  const p={mix:1,value:0,value2:0,value3:0};
+  if(id==="formant")p.value2=150;
+  else if(id==="vocoder"){p.value=100;p.value2=5;p.value3=80;}
+  else if(id==="bitcrusher"){p.value=6;p.value2=.55;}
+  else if(id==="ringmod"){p.value=110;p.value2=.85;}
+  else if(id==="distortion")p.value=.55;
+  else if(id==="chorus"){p.value=.33;p.value2=3.5;p.value3=18;}
+  else if(id==="reverb"){p.value=1.8;p.value2=.55;p.value3=.5;}
+  else if(id==="delay"){p.value=280;p.value2=.34;}
+  return p;
+}
+function normaliseModuleParams(source,chain,preset){
+  const src=source&&typeof source==="object"?source:{};
+  const out=JSON.parse(JSON.stringify(src));
+  for(const id of chain){
+    if(!isLabModule(id))continue;
+    const d=defaultModuleParams(id),had=Object.prototype.hasOwnProperty.call(src,id);
+    const raw=had&&src[id]&&typeof src[id]==="object"?src[id]:{};
+    const num=(key,fallback)=>raw[key]!=null&&Number.isFinite(+raw[key])?+raw[key]:fallback;
+    out[id]={
+      mix:Math.max(0,Math.min(1,num("mix",d.mix))),
+      value:num("value",d.value),value2:num("value2",d.value2),value3:num("value3",d.value3),
+    };
+    if(id==="pitch"){
+      if(!Object.prototype.hasOwnProperty.call(raw,"value"))out[id].value=+preset.transpose||0;
+      if(!Object.prototype.hasOwnProperty.call(raw,"value2"))out[id].value2=+preset.lfoDepth||0;
+      if(!Object.prototype.hasOwnProperty.call(raw,"value3"))out[id].value3=+preset.lfoRate||0;
+    }else if(id==="formant"&&!Object.prototype.hasOwnProperty.call(raw,"value")){
+      out[id].value=+preset.formant||0;
+    }
+  }
+  return out;
+}
+function isLabModule(id){return LAB_MODULES.some(m=>m.id===id);}
+function chainInfo(id){
+  const m=LAB_MODULES.find(x=>x.id===id);
+  if(m)return {label:m.label,desc:m.desc,icon:m.icon,lab:true};
+  const l=LEGACY_CHAIN[id]||[id,"совместимый модуль"];
+  return {label:l[0],desc:l[1],icon:"M4 7h16v10H4Z",lab:false};
+}
+function chainForEditor(p){
+  const raw=Array.isArray(p.chain)?p.chain.filter(id=>id&&id!=="none"):[];
+  if(p.chainExplicit||raw.some(isLabModule))return raw.slice(0,16);
+  const out=[];
+  if((p.eq||[]).some(v=>Math.abs(+v||0)>0.001))out.push("eq");
+  if(+p.transpose||+p.lfoDepth)out.push("pitch");
+  if(+p.formant)out.push("formant");
+  if(raw.length)out.push(...raw);
+  else{
+    if(p.space&&p.space!=="none")out.push(p.space);
+    if(p.effect&&p.effect!=="none")out.push(p.effect);
+  }
+  return out.slice(0,16);
+}
 
 // ---- Custom vertical fader -------------------------------------------------
 // Native <input type=range> vertical mode breaks in WebView2 (global CSS sets
@@ -131,10 +246,14 @@ function readEqFaders(store){return store.map(f=>+f.value.toFixed(2));}
 
 function demoState(){
   const P=["None","Male","Female","Baby","Helium","Robot","Alien","Atari","Clone","Mutation","Radio","Megaphone","Helmet","Cave","Hall","Silence"]
-    .map((n,i)=>({idx:i,name:n,transpose:i===2?4:0,formant:i===2?3:0,space:"none",effect:i>=5&&i<=9?n.toLowerCase():"none",
-      custom:i===5,hotkey:i===5?"Ctrl+Alt+F1":"",eq:[0,0,0,0,0,0,0,0],chain:[]}));
+    .map((n,i)=>({idx:i,name:n,transpose:i===2?4:0,formant:i===2?3:0,
+      space:i===10?"radio":i===11?"megaphone":i===12?"helmet":i===13?"cave":i===14?"hall":"none",
+      effect:i===5?"robot":i===6?"alien":i===7?"atari":i===8?"clone":i===15?"silence":"none",
+      lfoRate:i===9?0.25:0,lfoDepth:i===9?3.5:0,gate:true,comp:true,
+      custom:i===5,hotkey:i===5?"Ctrl+Alt+F1":"",eq:[0,0,0,0,0,0,0,0],chain:[],
+      ambient:i===10?"radio":i===13?"cave":"none",ambientGain:i===10?0.2:0.18}));
   const pk=[];for(let i=0;i<256;i++)pk.push(0.3+0.6*Math.abs(Math.sin(i*0.08)*Math.cos(i*0.03)));
-  return {type:"state",dspOn:true,bypassOn:true,duckingOn:false,monitorOn:false,preset:2,presets:P,
+  return {type:"state",dspOn:true,bypassOn:true,duckingOn:false,ambientOn:true,soundFxSend:false,monitorOn:false,preset:2,presets:P,
     sounds:[{id:1,name:"airhorn",dur:2.1,gain:1,loop:false,hotkey:"Ctrl+Alt+1",eq:[0,0,0,0,0],peaks:pk,
       rawPeaks:pk,sourceDur:2.1,tags:["hotkey","сигнал"],edits:{trimStart:0,trimEnd:0,gain:1,regions:[]}},
       {id:2,name:"bell",dur:1.2,gain:0.8,loop:false,hotkey:"",eq:[0,0,0,0,0],peaks:pk,
@@ -152,18 +271,22 @@ function demoState(){
     vadThresholdDb:-48,vadSleeping:false,hotkeys:{voice:"Ctrl+Alt+V",ai:""}};
 }
 
-function setSwitch(el,on){el.classList.toggle("on",!!on);}
+function setSwitch(el,on){el.classList.toggle("on",!!on);el.setAttribute("aria-pressed",String(!!on));}
 function updateTopLive(){if(!S)return;
   const p=[];
   if(S.e2eLatency!=null)p.push("Тракт "+Math.round(S.e2eLatency)+" мс");
   if(S.dspOn)p.push("DSP "+Math.round(S.voiceLatency)+" мс");
   if(S.ai.ready&&S.ai.enabled)p.push("AI "+Math.round(S.ai.latency)+" мс");
+  if(S.soundFxSend)p.push("FX Send");
+  if(S.ambientOn&&S.presets[S.preset]&&S.presets[S.preset].ambient!=="none")p.push("Ambient");
   if(S.vadSleeping)p.push("VAD sleep");
   $("topLive").textContent=p.join("   ·   ");}
 
 function renderState(){
   if(!S)return;
   setSwitch($("powerBtn"),S.dspOn&&S.bypassOn);setSwitch($("aiPowerBtn"),S.ai.enabled);
+  setSwitch($("ambientPowerBtn"),S.ambientOn);setSwitch($("fxSendBtn"),S.soundFxSend);
+  $("fxPresetLabel").textContent=S.presets[S.preset]?S.presets[S.preset].name:"";
   setSwitch($("monitorBtn"),S.devices.curMonitor>=0);
   renderPresets();renderTagFilter();renderSounds();renderAi();
   if(!settingsRenderedOnce){renderSettings();settingsRenderedOnce=true;}
@@ -182,6 +305,17 @@ function renderState(){
 }
 
 // ---- Presets ----
+function updateOverrideAvailability(){
+  if(!S)return;
+  const p=S.presets[S.preset];
+  const explicit=!!(p&&(p.chainExplicit||(Array.isArray(p.chain)&&p.chain.some(isLabModule))));
+  const has=id=>!explicit||(Array.isArray(p.chain)&&p.chain.includes(id));
+  $("pitchOv").disabled=!has("pitch");$("formantOv").disabled=!has("formant");
+  $("pitchOv").title=$("pitchOv").disabled?"Добавь Pitch в VoiceLab":"";
+  $("formantOv").title=$("formantOv").disabled?"Добавь Formant в VoiceLab":"";
+  const eqOff=!has("eq");$("voiceEq").classList.toggle("controls-disabled",eqOff);
+  $("voiceEq").title=eqOff?"Добавь 8-band EQ в VoiceLab":"";
+}
 function renderPresets(){
   const grid=$("presetGrid");grid.innerHTML="";
   for(const p of S.presets){
@@ -189,14 +323,16 @@ function renderPresets(){
     tile.className="tile"+(p.idx===S.preset?" active":"");
     const sub=[];
     if(p.transpose)sub.push((p.transpose>0?"+":"")+p.transpose);
-    if(p.chain&&p.chain.length)sub.push(p.chain.join("→"));
+    if(p.chainExplicit||(p.chain&&p.chain.length))sub.push(p.chain.length?p.chain.slice(0,3).join("→"):"direct");
     else{if(p.space!=="none")sub.push(p.space);if(p.effect!=="none")sub.push(p.effect);}
+    if(p.ambient&&p.ambient!=="none")sub.push("amb:"+p.ambient.split("/").pop());
     tile.innerHTML=presetIcon(p.name)+`<div class="t-name">${esc(p.name)}</div><div class="t-sub">${esc(sub.join(" "))}</div>`+
       (p.hotkey?`<span class="keycap" data-hk="preset" data-idx="${p.idx}">${esc(p.hotkey)}</span>`:"");
     // Click = apply + open editor
     tile.addEventListener("click",(e)=>{
       if(e.target.classList.contains("keycap")){startHkCapture({target:"preset",idx:p.idx,combo:p.hotkey});return;}
       send({cmd:"preset",idx:p.idx});S.preset=p.idx;renderPresets();
+      $("fxPresetLabel").textContent=p.name;
       openPresetEditor(p.idx); // auto-open editor with this preset
     });
     // Edit button
@@ -205,6 +341,7 @@ function renderPresets(){
     tile.appendChild(edt);
     grid.appendChild(tile);
   }
+  updateOverrideAvailability();
 }
 
 // ---- Preset editor panel ----
@@ -217,11 +354,38 @@ function collectEditorDef(){
     formant:+$("peFormant").value,
     timbre:+$("peTimbre").value,
     strength:+$("peStrength").value,
+    lfoRate:p&&p.lfoRate!=null?+p.lfoRate:0,
+    lfoDepth:p&&p.lfoDepth!=null?+p.lfoDepth:0,
+    gate:p&&p.gate!=null?!!p.gate:true,
+    comp:p&&p.comp!=null?!!p.comp:true,
     space:$("peSpace").value,
     effect:$("peEffect").value,
-    chain:(p&&p.chain)?[...p.chain]:[],
+    chain:editorChainDirty?[...editorChain]:(p&&Array.isArray(p.chain)?[...p.chain]:[]),
+    chainExplicit:editorChainDirty?true:!!(p&&p.chainExplicit),
+    moduleParams:JSON.parse(JSON.stringify(editorModuleParams)),
     eq:eq,
+    ambient:$("peAmbient").value,
+    ambientGain:+$("peAmbientGain").value/100,
   };
+}
+
+function setAmbientEditor(p){
+  const sel=$("peAmbient");
+  sel.querySelectorAll("optgroup[data-custom]").forEach(o=>o.remove());
+  const files=(S&&S.ambients||[]).slice();
+  if(p.ambient&&p.ambient.indexOf("ambiences/")===0&&!files.some(f=>f.id===p.ambient))
+    files.push({id:p.ambient,name:p.ambient.split("/").pop()});
+  if(files.length){
+    const group=document.createElement("optgroup");group.label="Мои эмбиенты";group.dataset.custom="1";
+    for(const f of files){
+      const o=document.createElement("option");o.value=f.id;o.textContent=f.name||f.id.split("/").pop();
+      group.appendChild(o);
+    }
+    sel.appendChild(group);
+  }
+  sel.value=p.ambient||"none";
+  const gain=Math.round((p.ambientGain!=null?+p.ambientGain:0.18)*100);
+  $("peAmbientGain").value=gain;$("peAmbientGainVal").textContent=gain+"%";
 }
 
 function openPresetEditor(idx){
@@ -237,59 +401,216 @@ function openPresetEditor(idx){
   $("peStrength").value=strength;$("peStrengthVal").textContent=strength.toFixed(2);
   $("peSpace").value=p.space||"none";
   $("peEffect").value=p.effect||"none";
-  if(!p.chain)p.chain=[];
-  renderChainList(p.chain);
+  editorChainExplicit=!!p.chainExplicit||(Array.isArray(p.chain)&&p.chain.some(isLabModule));
+  editorChainDirty=editorChainExplicit;
+  editorChain=chainForEditor(p);
+  editorModuleParams=normaliseModuleParams(p.moduleParams,editorChain,p);
+  editingModuleId=null;$("peModuleParams").classList.add("hidden");
+  renderChainList();renderModulePalette();renderModuleControls();
+  setAmbientEditor(p);
   setEqFaders(editorFaders,p.eq);
 }
 function closePresetEditor(){
   $("presetEditor").classList.add("hidden");
-  editingPreset=-1;editorDismissed=true;
+  editingPreset=-1;editorDismissed=true;editorChain=[];editorChainExplicit=false;editorChainDirty=false;editorModuleParams={};editingModuleId=null;chainDragIndex=-1;
 }
 
 function sendLiveUpdate(){
   if(editingPreset<0)return;
+  const idx=editingPreset;
   clearTimeout(liveTimer);
   liveTimer=setTimeout(()=>{
+    if(editingPreset!==idx)return;
     const def=collectEditorDef();
-    send({cmd:"livePreset",idx:editingPreset,...def});
+    send({cmd:"livePreset",idx,...def});
   },150);
 }
 
-function renderChainList(chain){
-  const el=$("peChainList");el.innerHTML="";
-  if(!chain||!chain.length){el.innerHTML=`<span class="dim">пусто</span>`;return;}
-  chain.forEach((c,i)=>{
-    const row=document.createElement("div");row.className="chain-row";
-    row.innerHTML=`<span class="mono">${i+1}.</span> <b>${esc(c)}</b>`;
-    const up=document.createElement("button");up.className="s-ctl";up.textContent="↑";
-    up.addEventListener("click",()=>{if(i>0){chain.splice(i-1,0,chain.splice(i,1)[0]);renderChainList(chain);sendLiveUpdate();}});
-    const dn=document.createElement("button");dn.className="s-ctl";dn.textContent="↓";
-    dn.addEventListener("click",()=>{if(i<chain.length-1){chain.splice(i+1,0,chain.splice(i,1)[0]);renderChainList(chain);sendLiveUpdate();}});
-    const rm=document.createElement("button");rm.className="s-ctl del";rm.textContent="✕";
-    rm.addEventListener("click",()=>{chain.splice(i,1);renderChainList(chain);sendLiveUpdate();});
-    row.appendChild(up);row.appendChild(dn);row.appendChild(rm);
+function commitEditorChain(){
+  editorChainExplicit=true;editorChainDirty=true;
+  editorModuleParams=normaliseModuleParams(editorModuleParams,editorChain,S.presets[editingPreset]||{});
+  if(editingPreset>=0&&S.presets[editingPreset]){
+    S.presets[editingPreset].chain=[...editorChain];
+    S.presets[editingPreset].chainExplicit=true;
+    S.presets[editingPreset].moduleParams=JSON.parse(JSON.stringify(editorModuleParams));
+  }
+  renderChainList();renderModulePalette();renderModuleControls();updateOverrideAvailability();sendLiveUpdate();
+}
+function moveChain(from,to){
+  if(from<0||from>=editorChain.length||to<0||to>=editorChain.length||from===to)return;
+  const item=editorChain.splice(from,1)[0];editorChain.splice(to,0,item);commitEditorChain();
+}
+function renderChainList(){
+  const el=$("peChainList");el.innerHTML="";chainDragIndex=-1;
+  if(!editorChain.length){el.innerHTML='<div class="chain-empty">Нет модулей — сигнал идёт напрямую</div>';return;}
+  editorChain.forEach((id,i)=>{
+    const info=chainInfo(id);
+    const row=document.createElement("div");row.className="chain-row"+(editingModuleId===id?" selected":"");row.draggable=true;
+    row.setAttribute("role","listitem");row.dataset.index=i;
+    row.setAttribute("aria-label",`${i+1}. ${info.label}`);
+    row.innerHTML=`<span class="drag-handle" title="Перетащить" aria-hidden="true"><svg viewBox="0 0 12 16"><circle cx="3" cy="3" r="1"/><circle cx="9" cy="3" r="1"/><circle cx="3" cy="8" r="1"/><circle cx="9" cy="8" r="1"/><circle cx="3" cy="13" r="1"/><circle cx="9" cy="13" r="1"/></svg></span>`+
+      `<span class="chain-index">${String(i+1).padStart(2,"0")}</span>`+
+      `<span class="chain-info"><b>${esc(info.label)}</b><small>${esc(info.desc)}</small></span>`+
+      `<span class="chain-actions"></span>`;
+    const actions=row.querySelector(".chain-actions");
+    const up=document.createElement("button");up.type="button";up.className="s-ctl";up.textContent="↑";
+    up.title="Выше";up.setAttribute("aria-label",`Выше: ${info.label}`);up.disabled=i===0;
+    up.addEventListener("click",()=>moveChain(i,i-1));
+    const dn=document.createElement("button");dn.type="button";dn.className="s-ctl";dn.textContent="↓";
+    dn.title="Ниже";dn.setAttribute("aria-label",`Ниже: ${info.label}`);dn.disabled=i===editorChain.length-1;
+    dn.addEventListener("click",()=>moveChain(i,i+1));
+    if(info.lab){
+      const cfg=document.createElement("button");cfg.type="button";cfg.className="s-ctl";cfg.innerHTML=ICONS.settings;
+      cfg.title="Параметры";cfg.setAttribute("aria-label",`Параметры: ${info.label}`);
+      cfg.setAttribute("aria-expanded",String(editingModuleId===id));
+      cfg.addEventListener("click",()=>selectModule(id));
+      actions.appendChild(cfg);
+    }
+    const rm=document.createElement("button");rm.type="button";rm.className="s-ctl del";rm.textContent="×";
+    rm.title="Убрать";rm.setAttribute("aria-label",`Убрать: ${info.label}`);
+    rm.addEventListener("click",()=>{
+      editorChain.splice(i,1);
+      if(editingModuleId===id){editingModuleId=null;$("peModuleParams").classList.add("hidden");}
+      commitEditorChain();
+    });
+    actions.appendChild(up);actions.appendChild(dn);actions.appendChild(rm);
+    row.addEventListener("dragstart",e=>{
+      chainDragIndex=i;e.dataTransfer.effectAllowed="move";
+      e.dataTransfer.setData("text/plain",String(i));
+      requestAnimationFrame(()=>row.classList.add("dragging"));
+      e.stopPropagation();
+    });
+    row.addEventListener("dragend",()=>{
+      row.classList.remove("dragging");
+      el.querySelectorAll(".drop-target").forEach(x=>x.classList.remove("drop-target"));
+      chainDragIndex=-1;
+    });
+    row.addEventListener("dragenter",e=>{e.preventDefault();e.stopPropagation();row.classList.add("drop-target");});
+    row.addEventListener("dragover",e=>{e.preventDefault();e.stopPropagation();e.dataTransfer.dropEffect="move";});
+    row.addEventListener("dragleave",e=>{e.stopPropagation();row.classList.remove("drop-target");});
+    row.addEventListener("drop",e=>{
+      e.preventDefault();e.stopPropagation();
+      const from=chainDragIndex>=0?chainDragIndex:parseInt(e.dataTransfer.getData("text/plain"),10);
+      row.classList.remove("drop-target");moveChain(from,i);
+    });
     el.appendChild(row);
   });
+}
+function formatModuleParam(def,v){
+  if(def.percent)return Math.round(v*100)+"%";
+  const digits=def.step>=1?0:(def.step<.1?2:1);
+  return v.toFixed(digits)+(def.unit||"");
+}
+function syncModuleSliders(id){
+  if(!editorModuleParams[id])return;
+  if(id==="pitch"){
+    const v=editorModuleParams[id].value;
+    $("pePitch").value=v;$("pePitchVal").textContent=(v>0?"+":"")+Math.round(v);
+  }else if(id==="formant"){
+    const v=editorModuleParams[id].value;
+    $("peFormant").value=v;$("peFormantVal").textContent=(v>0?"+":"")+Math.round(v);
+  }
+}
+function selectModule(id){
+  if(!isLabModule(id))return;
+  editorModuleParams=normaliseModuleParams(editorModuleParams,[id],S.presets[editingPreset]||{});
+  editingModuleId=id;renderChainList();renderModuleParams();
+}
+function renderModuleParams(){
+  const panel=$("peModuleParams"),body=$("peModuleParamsBody");
+  if(!editingModuleId){panel.classList.add("hidden");return;}
+  panel.classList.remove("hidden");$("peModuleParamsTitle").textContent=chainInfo(editingModuleId).label+" · параметры";
+  body.innerHTML="";
+  const mix={key:"mix",label:"Сила / Mix",min:0,max:1,step:.01,percent:true};
+  const defs=[mix,...(MODULE_PARAM_DEFS[editingModuleId]||[])];
+  for(const def of defs){
+    const row=document.createElement("label");row.className="module-param-row";
+    const name=document.createElement("span");name.textContent=def.label;
+    const input=document.createElement("input");input.type="range";input.min=def.min;input.max=def.max;input.step=def.step;input.dataset.key=def.key;
+    const params=editorModuleParams[editingModuleId];input.value=params[def.key];
+    const out=document.createElement("output");out.className="mono";out.textContent=formatModuleParam(def,+input.value);
+    input.setAttribute("aria-label",def.label);input.setAttribute("aria-valuetext",out.textContent);
+    input.addEventListener("input",()=>{
+      let v=Math.max(def.min,Math.min(def.max,+input.value));
+      editorModuleParams[editingModuleId][def.key]=v;out.textContent=formatModuleParam(def,v);
+      input.setAttribute("aria-valuetext",out.textContent);
+      if(editingPreset>=0)S.presets[editingPreset].moduleParams=JSON.parse(JSON.stringify(editorModuleParams));
+      editorChainDirty=true;syncModuleSliders(editingModuleId);sendLiveUpdate();
+    });
+    row.appendChild(name);row.appendChild(input);row.appendChild(out);body.appendChild(row);
+  }
+  if(editingModuleId==="eq"){
+    const note=document.createElement("div");note.className="note";
+    note.textContent="Полосы EQ настраиваются в секции «Эквалайзер» ниже. Mix меняет общую силу этого блока.";
+    body.appendChild(note);
+  }
+}
+function renderModuleControls(){
+  document.querySelectorAll("#presetEditor [data-module]").forEach(row=>{
+    const on=editorChain.includes(row.dataset.module);
+    row.classList.toggle("disabled",!on);
+    row.title=on?"":`Добавь блок ${chainInfo(row.dataset.module).label} в VoiceLab`;
+    row.querySelectorAll("input").forEach(i=>i.disabled=!on);
+  });
+}
+function renderModulePalette(){
+  const el=$("peModulePalette");el.innerHTML="";
+  for(const m of LAB_MODULES){
+    const b=document.createElement("button");b.type="button";b.className="module-btn";
+    const used=editorChain.includes(m.id);b.disabled=used;
+    b.title=used?`${m.label} уже в цепочке`:`Добавить ${m.label}`;
+    b.setAttribute("aria-label",b.title);
+    b.innerHTML=SVGP(m.icon)+`<span>${esc(m.label)}</span>`+(used?'<span class="module-state">✓</span>':'');
+    b.addEventListener("click",()=>{
+      if(editorChain.length>=16){toast("Максимум 16 модулей");return;}
+      editorChain.push(m.id);commitEditorChain();selectModule(m.id);
+    });
+    el.appendChild(b);
+  }
 }
 
 // Editor events — live apply on every change
 $("peClose").addEventListener("click",closePresetEditor);
+$("peModuleParamsClose").addEventListener("click",()=>{
+  editingModuleId=null;$("peModuleParams").classList.add("hidden");renderChainList();
+});
 [["pePitch","pePitchVal","semi"],["peFormant","peFormantVal","semi"],
  ["peTimbre","peTimbreVal","dec"],["peStrength","peStrengthVal","dec"]].forEach(([id,val,fmt])=>{
   $(id).addEventListener("input",(e)=>{
     const v=+e.target.value;
     $(val).textContent=fmt==="dec"?v.toFixed(2):(v>0?"+":"")+v;
+    if(id==="pePitch"&&editorModuleParams.pitch)editorModuleParams.pitch.value=v;
+    if(id==="peFormant"&&editorModuleParams.formant)editorModuleParams.formant.value=v;
+    if(editingPreset>=0&&(id==="pePitch"||id==="peFormant"))
+      S.presets[editingPreset].moduleParams=JSON.parse(JSON.stringify(editorModuleParams));
+    if((id==="pePitch"&&editingModuleId==="pitch")||(id==="peFormant"&&editingModuleId==="formant"))renderModuleParams();
     sendLiveUpdate(); // live apply
   });
 });
-$("peSpace").addEventListener("change",()=>sendLiveUpdate());
-$("peEffect").addEventListener("change",()=>sendLiveUpdate());
-$("peAddChain").addEventListener("click",()=>{
-  const sel=$("peChainSel").value;if(!sel)return;
-  const p=S.presets[editingPreset];
-  if(!p.chain)p.chain=[];
-  if(p.chain.length>=6){toast("Максимум 6 эффектов");return;}
-  p.chain.push(sel);renderChainList(p.chain);sendLiveUpdate();
+function setLegacyChainValue(group,value){
+  const ids=group==="space"?["room","hall","cave","helmet","radio","megaphone"]:["robot","alien","atari","clone","silence"];
+  editorChain=editorChain.filter(id=>!ids.includes(id));
+  if(value&&value!=="none")editorChain.push(value);
+  commitEditorChain();
+}
+$("peSpace").addEventListener("change",e=>setLegacyChainValue("space",e.target.value));
+$("peEffect").addEventListener("change",e=>setLegacyChainValue("effect",e.target.value));
+$("peAmbient").addEventListener("change",e=>{
+  if(editingPreset<0)return;
+  const p=S.presets[editingPreset];p.ambient=e.target.value;
+  send({cmd:"setPresetAmbient",idx:editingPreset,ambient:p.ambient,gain:+$("peAmbientGain").value/100});
+});
+$("peAmbientGain").addEventListener("input",e=>{
+  const gain=+e.target.value,idx=editingPreset;$("peAmbientGainVal").textContent=gain+"%";
+  if(idx>=0)S.presets[idx].ambientGain=gain/100;
+  clearTimeout(ambientTimer);
+  ambientTimer=setTimeout(()=>{
+    if(idx<0||editingPreset!==idx)return;
+    send({cmd:"setPresetAmbient",idx,ambient:$("peAmbient").value,gain:gain/100});
+  },120);
+});
+$("peAmbientFile").addEventListener("click",()=>{
+  if(editingPreset>=0)send({cmd:"ambientFileDialog",idx:editingPreset});
 });
 $("peSave").addEventListener("click",()=>{
   if(editingPreset<0)return;
@@ -802,6 +1123,11 @@ function renderMeters(m){
   if(m.e2eLatency!=null)S.e2eLatency=m.e2eLatency;
   if(m.voiceLatency!=null)S.voiceLatency=m.voiceLatency;
   if(m.dspOn!=null)S.dspOn=m.dspOn;
+  if(m.preset!=null&&S.preset!==m.preset){
+    S.preset=m.preset;renderPresets();
+    $("fxPresetLabel").textContent=S.presets[m.preset]?S.presets[m.preset].name:"";
+    if(editingPreset>=0)openPresetEditor(m.preset);
+  }
   if(m.aiOn!=null){S.ai.enabled=m.aiOn;if(m.aiLatency!=null)S.ai.latency=m.aiLatency;}
   const thr=Math.pow(10,(S.vadThresholdDb!=null?S.vadThresholdDb:-48)/20);
   const mark=$("vadMark");
@@ -835,6 +1161,16 @@ $("aiPowerBtn").addEventListener("click",()=>{
   if(!S.ai.ready){toast("Загрузи AI-голос");return;}
   send({cmd:"aiOn",on:!S.ai.enabled});S.ai.enabled=!S.ai.enabled;
   setSwitch($("aiPowerBtn"),S.ai.enabled);updateTopLive();});
+$("ambientPowerBtn").addEventListener("click",()=>{
+  if(!S)return;const on=!S.ambientOn;send({cmd:"ambientOn",on});S.ambientOn=on;
+  setSwitch($("ambientPowerBtn"),on);updateTopLive();});
+$("fxSendBtn").addEventListener("click",()=>{
+  if(!S)return;const on=!S.soundFxSend;send({cmd:"soundFxSend",on});S.soundFxSend=on;
+  setSwitch($("fxSendBtn"),on);updateTopLive();
+  if(on)toast("Саундборд идёт через текущий пресет"+(S.ai.enabled?" и RVC":""));});
+$("addPresetBtn").addEventListener("click",()=>{
+  if(!S)return;openPresetEditor(S.preset>=0?S.preset:0);
+  $("peName").focus();$("peName").select();toast("Задай новое имя и нажми «Сохранить как новый»");});
 
 // Overrides
 let ovTimer=null;
@@ -998,22 +1334,26 @@ document.addEventListener("keydown",e=>{
 // objects to the host via postMessageWithAdditionalObjects().
 let dragDepth=0;
 document.addEventListener("dragenter",e=>{
+  if(e.target.closest&&e.target.closest(".chain-row"))return;
   e.preventDefault();
   dragDepth++;
   document.body.classList.add("dropzone-active");
 });
 document.addEventListener("dragover",e=>{
+  if(e.target.closest&&e.target.closest(".chain-row"))return;
   // preventDefault is required to make the element a valid drop target.
   e.preventDefault();
   if(e.dataTransfer)e.dataTransfer.dropEffect="copy";
   document.body.classList.add("dropzone-active");
 });
 document.addEventListener("dragleave",e=>{
+  if(e.target.closest&&e.target.closest(".chain-row"))return;
   e.preventDefault();
   dragDepth=Math.max(0,dragDepth-1);
   if(dragDepth===0)document.body.classList.remove("dropzone-active");
 });
 document.addEventListener("drop",e=>{
+  if(e.target.closest&&e.target.closest(".chain-row"))return;
   e.preventDefault();
   dragDepth=0;
   document.body.classList.remove("dropzone-active");
@@ -1051,6 +1391,7 @@ if(host){
       const oldIds=new Set((S&&S.sounds||[]).map(s=>s.id));
       const newIds=new Set((m.sounds||[]).map(s=>s.id));
       S=m;renderState();loadVoiceEq();
+      if(editingPreset>=0&&S.presets[editingPreset])setAmbientEditor(S.presets[editingPreset]);
       if(!first){
         let added=0,removed=0;
         newIds.forEach(id=>{if(!oldIds.has(id))added++;});

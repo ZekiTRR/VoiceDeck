@@ -11,6 +11,9 @@
 #include "signalsmith-basics/reverb.h"
 #include "signalsmith-stretch.h"
 
+#include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <vector>
@@ -19,13 +22,27 @@ namespace vd {
 
 enum class Space { None, Room, Hall, Cave, Helmet, Radio, Megaphone };
 enum class Effect { None, Robot, Alien, Atari, Clone, Silence };
+enum class LabModule {
+    None,
+    Pitch,
+    Formant,
+    Vocoder,
+    Bitcrusher,
+    Ringmod,
+    Distortion,
+    Chorus,
+    Reverb,
+    Delay,
+    Eq
+};
 
 // One element in the effect chain.
 struct ChainItem {
-    enum class Kind { Space, Effect };
+    enum class Kind { Space, Effect, VoiceLab };
     Kind kind;
     Space space;
     Effect effect;
+    LabModule module;
 };
 
 // One full voice-processing chain. Audio-thread only.
@@ -34,9 +51,7 @@ struct ChainItem {
 // AI stage). The chain handles the character part:
 //
 // enhanced in -> Character (Stretch: transpose/formant/LFO)
-//            -> Space (reverb / band-pass+crunch / low-pass)
-//            -> Effect (robot comb+ringmod, alien shimmer, atari crush,
-//                       clone twin, silence)
+//            -> ordered legacy/VoiceLab modules
 //            -> Limiter -> dry/wet(strength) -> out
 class VoiceChain {
 public:
@@ -50,7 +65,7 @@ public:
     // Reconfigure the Stretch STFT for the given latency mode (0/1/2).
     void setStretchConfig(int blockSamples, int intervalSamples) {
         stretch_.configure(2, blockSamples, intervalSamples, /*splitComputation=*/true);
-        stretch_.setFormantBase(150.0 / sr_);
+        stretch_.setFormantBase(float(150.0 / sr_));
         stretch_.reset();
         updateLatency();
     }
@@ -60,42 +75,103 @@ public:
     void resetTail();
 
     double latencyMs() const { return latencyMs_; }
+    double tailSeconds() const { return tailSeconds_; }
 
 private:
+    struct PresetParams {
+        float transpose = 0.0f;
+        float formant = 0.0f;
+        float strength = 1.0f;
+        float lfoRate = 0.0f;
+        float lfoDepth = 0.0f;
+        float eq[8] = {};
+    };
+
+    struct PeakingBand {
+        float b0 = 1.0f, b1 = 0.0f, b2 = 0.0f;
+        float a1 = 0.0f, a2 = 0.0f;
+        float x1 = 0.0f, x2 = 0.0f;
+        float y1 = 0.0f, y2 = 0.0f;
+
+        void setup(double sampleRate, double centerHz, double gainDb);
+        float process(float input);
+        void reset();
+    };
+
     void updateLatency();
-    void processEffect(std::size_t frames);
+    void configureSpace(Space space);
+    void configureVoiceLabReverb(const VoiceLabParams& params);
+    void configureVoiceLabVocoder(const VoiceLabParams& params);
+    void processStretch(const float* srcL, const float* srcR,
+                        float* dstL, float* dstR, std::size_t frames,
+                        float transpose, float formant,
+                        float formantBaseHz = 150.0f);
+    void applyVoiceLab(LabModule module, const float* srcL, const float* srcR,
+                       float* dstL, float* dstR, std::size_t frames,
+                       float transpose, float formant);
+    void resetClone();
 
     double sr_ = 48000.0;
-    VoicePreset p_{};
-    Space space_ = Space::None;
-    Effect effect_ = Effect::None;
-    bool useStretch_ = false;
+    PresetParams params_{};
+    // Fixed, scalar-only snapshot indexed by LabModule (None=0 .. Eq=10).
+    std::array<VoiceLabParams, 11> labParams_{};
+    bool voiceLabChain_ = false;
+    bool hasActiveChain_ = false;
+    Space configuredSpace_ = Space::None;
+    bool voiceLabReverbActive_ = false;
+    bool usesReverb_ = false;
+    bool usesClone_ = false;
+    bool usesDelay_ = false;
+    int stretchStages_ = 0;
     bool fastPath_ = false; // no stretch, no chain -> soft clipper, 0 ms
     double latencyMs_ = 0.0;
-    float lfoPhase_ = 0.0f;
+    double tailSeconds_ = 0.10;
+    float lfoPhase_ = 0.0f;       // legacy block-rate pitch LFO
+    float pitchLfoPhase_ = 0.0f; // explicit Pitch module vibrato
 
-    // --- stage buffers (allocated once in ctor; process never allocates)
+    // --- stage buffers (allocated once in ctor; configure/process never allocate)
     std::vector<float> inL_, inR_;  // de-interleaved (already enhanced) input
     std::vector<float> cL_, cR_;   // post character (stretch output or copy of in)
     std::vector<float> xL_, xR_;   // scratch (band-pass / low-pass)
-    std::vector<float> spL_, spR_; // post space
+    std::vector<float> spL_, spR_; // post module chain
     std::vector<float> fL_, fR_;   // post limiter
 
     // --- character (pitch/formant, Signalsmith Stretch)
     signalsmith::stretch::SignalsmithStretch<float> stretch_;
-    std::vector<ChainItem> chain_;  // ordered effect chain
+    static constexpr std::size_t kMaxChainItems = 16;
+    std::array<ChainItem, kMaxChainItems> chain_{}; // ordered effect chain
+    std::size_t chainSize_ = 0;
 
-    // --- space
-    signalsmith::basics::ReverbFloat reverb_;
+    // --- legacy space
+    signalsmith::basics::ReverbFloat reverb_{400.0}; // cave needs > 200 ms room size
     signalsmith::basics::CrunchFloat crunch_;
     Iir::Butterworth::BandPass<2> bp_[2];
     Iir::Butterworth::LowPass<2> lpf_[2];
 
-    // --- effect
+    // --- legacy effect
     daisysp::DelayLine<float, 512> comb_[2]; // robot comb (up to ~10 ms)
     daisysp::PitchShifter twin_[2];          // clone: +12 semitones twin
-    daisysp::Decimator crush_[2];            // atari bit-crush
+    daisysp::Decimator crush_[2];            // atari/bitcrusher
     float ringPhase_ = 0.0f;
+
+    // --- VoiceLab modules
+    static constexpr std::size_t kVocoderBands = 8;
+    Iir::Butterworth::BandPass<2> vocoderAnalysis_[kVocoderBands];
+    Iir::Butterworth::BandPass<2> vocoderCarrier_[kVocoderBands];
+    float vocoderEnvelope_[kVocoderBands] = {};
+    float vocoderCarrierEnvelope_[kVocoderBands] = {};
+    float vocoderAttack_ = 0.0f;
+    float vocoderRelease_ = 0.0f;
+    float vocoderPhase_ = 0.0f;
+
+    static constexpr std::size_t kFeedbackDelayCapacity = 38401; // 800 ms @ 48 kHz
+    static constexpr std::size_t kChorusDelayCapacity = 4096;    // ~85 ms @ 48 kHz
+    daisysp::DelayLine<float, kFeedbackDelayCapacity> feedbackDelay_[2];
+    daisysp::DelayLine<float, kChorusDelayCapacity> chorusDelay_[2];
+    float chorusPhase_ = 0.0f;
+
+    PeakingBand eq_[8][2];
+    std::array<bool, 8> eqActive_{};
 
     // --- master
     signalsmith::basics::LimiterFloat limiter_{10.0}; // max 10 ms lookahead
@@ -125,7 +201,17 @@ public:
 
     // Any thread.
     int activePresetIndex() const { return curIdx_.load(std::memory_order_relaxed); }
+    // Audio thread only (also inspects the pending crossfade target).
+    bool matchesPreset(int index) const {
+        const int target = pending_ >= 0 ? pendingIdx_ : curIdx_.load(std::memory_order_relaxed);
+        return target == index;
+    }
     float latencyMs() const { return latencyMs_.load(std::memory_order_relaxed); }
+    // Audio thread: longest tail among active and crossfade-target chains.
+    double tailSeconds() const {
+        return std::max(chains_[active_].tailSeconds(),
+                        pending_ >= 0 ? chains_[pending_].tailSeconds() : 0.0);
+    }
 
 private:
     VoiceChain chains_[2];

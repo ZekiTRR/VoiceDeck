@@ -126,6 +126,7 @@ struct ReverbSTFX : public BaseEffect {
 		delay1.reset();
 		delay2.reset();
 		delay3.reset();
+		delay4.reset();
 		delayFeedback.reset();
 		delayEarly.reset();
 		

@@ -5,15 +5,27 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
+#include <new>
+#include <stdexcept>
 
 namespace vd {
 
 bool Sound::loadFromFile(Sound& out, std::uint64_t id, const std::filesystem::path& path,
-                         std::uint32_t sampleRate, std::uint32_t channels, std::string& err) {
+                         std::uint32_t sampleRate, std::uint32_t channels, std::string& err,
+                          double maxDurationSec, std::uint64_t maxFileBytes) {
     // ma_decoder_config_init(format, channels, outputSampleRate): the decoder
     // converts everything on the fly - format, channel count and sample rate
     // (via its internal ma_resampler, linear algorithm). What we read out is
     // exactly engine-format float32 PCM.
+    if (maxFileBytes > 0) {
+        std::error_code ec;
+        const auto bytes = std::filesystem::file_size(path, ec);
+        if (!ec && bytes > maxFileBytes) {
+            err = "audio file is too large";
+            return false;
+        }
+    }
     ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, channels, sampleRate);
 
     ma_decoder dec;
@@ -26,16 +38,47 @@ bool Sound::loadFromFile(Sound& out, std::uint64_t id, const std::filesystem::pa
 
     ma_uint64 total = 0;
     ma_decoder_get_length_in_pcm_frames(&dec, &total);
-    if (total > 0) out.pcm.reserve(static_cast<std::size_t>(total) * channels);
-
-    constexpr ma_uint64 kChunkFrames = 4096;
-    std::vector<float> chunk(static_cast<std::size_t>(kChunkFrames) * channels);
-    for (;;) {
-        ma_uint64 read = 0;
-        if (ma_decoder_read_pcm_frames(&dec, chunk.data(), kChunkFrames, &read) != MA_SUCCESS || read == 0)
-            break;
-        out.pcm.insert(out.pcm.end(), chunk.begin(),
-                       chunk.begin() + static_cast<std::ptrdiff_t>(read) * channels);
+    if (maxDurationSec > 0.0 && sampleRate > 0 &&
+        total > ma_uint64(maxDurationSec * double(sampleRate))) {
+        ma_decoder_uninit(&dec);
+        err = "audio is longer than " + std::to_string(int(maxDurationSec)) + " seconds";
+        return false;
+    }
+    if (total > std::numeric_limits<std::size_t>::max() / std::max(1u, channels)) {
+        ma_decoder_uninit(&dec);
+        err = "audio is too large";
+        return false;
+    }
+    try {
+        if (total > 0) out.pcm.reserve(static_cast<std::size_t>(total) * channels);
+        constexpr ma_uint64 kChunkFrames = 4096;
+        std::vector<float> chunk(static_cast<std::size_t>(kChunkFrames) * channels);
+        for (;;) {
+            ma_uint64 read = 0;
+            if (ma_decoder_read_pcm_frames(&dec, chunk.data(), kChunkFrames, &read) != MA_SUCCESS ||
+                read == 0)
+                break;
+            if (maxDurationSec > 0.0 && sampleRate > 0 &&
+                out.pcm.size() / std::max(1u, channels) + read >
+                    ma_uint64(maxDurationSec * double(sampleRate))) {
+                ma_decoder_uninit(&dec);
+                out.pcm.clear();
+                err = "audio is longer than " + std::to_string(int(maxDurationSec)) + " seconds";
+                return false;
+            }
+            out.pcm.insert(out.pcm.end(), chunk.begin(),
+                           chunk.begin() + static_cast<std::ptrdiff_t>(read) * channels);
+        }
+    } catch (const std::bad_alloc&) {
+        ma_decoder_uninit(&dec);
+        out.pcm.clear();
+        err = "not enough memory to decode audio";
+        return false;
+    } catch (const std::length_error&) {
+        ma_decoder_uninit(&dec);
+        out.pcm.clear();
+        err = "audio is too large";
+        return false;
     }
     ma_decoder_uninit(&dec);
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/ai/AiVoiceStage.hpp"
+#include "core/dsp/AmbientPlayer.hpp"
 #include "core/dsp/VoiceProcessor.hpp"
 #include "core/engine/CommandQueue.hpp"
 #include "core/engine/DriftPath.hpp"
@@ -18,6 +19,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -84,17 +87,33 @@ public:
     bool isRunning() const { return running_.load(std::memory_order_relaxed); }
     bool monitorRunning() const { return monRunning_; }
 
-    // Control-thread API (thread-safe command transport).
-    void submit(const Command& c) { queue_.submit(c); }
+    // Control-thread API. The recursive mutex serialises hotkey/UI/CLI
+    // producers; mutation paths hold lockControl() across drain + snapshot swap.
+    std::unique_lock<std::recursive_mutex> lockControl() { return std::unique_lock<std::recursive_mutex>(controlMtx_); }
+    void submit(const Command& c) {
+        std::lock_guard<std::recursive_mutex> lock(controlMtx_);
+        queue_.submit(c);
+    }
     const VoiceMixer& mixer() const { return mixer_; }
     bool bypassEnabled() const { return bypass_.load(std::memory_order_relaxed); }
     bool duckingOn() const { return ducking_.load(std::memory_order_relaxed); }
+    bool ambientEnabled() const { return ambientOn_.load(std::memory_order_relaxed); }
+    bool soundFxSend() const { return soundFxSend_.load(std::memory_order_relaxed); }
 
     // Voice presets: set once from the control side before audio starts.
     // Entries are immutable afterwards; the audio thread only reads them via
     // SetPreset commands.
-    void setPresets(std::vector<VoicePreset> presets) { presets_ = std::move(presets); }
+    void setPresets(std::vector<VoicePreset> presets) {
+        std::lock_guard<std::recursive_mutex> lock(controlMtx_);
+        presets_ = std::move(presets);
+    }
     const std::vector<VoicePreset>& presets() const { return presets_; }
+    // Portable custom ambience PCM, aligned with presets_. The control thread
+    // drains commands before replacing this immutable snapshot.
+    void setPresetAmbients(std::vector<std::shared_ptr<const Sound>> ambients) {
+        std::lock_guard<std::recursive_mutex> lock(controlMtx_);
+        presetAmbients_ = std::move(ambients);
+    }
 
     // Latency mode (0=low, 1=normal, 2=hq): changes the WASAPI period and
     // the Stretch STFT block size. Restarts devices if running.
@@ -134,11 +153,16 @@ public:
     // Live tuning knobs (lock-free atomics; CLI writes, threads read).
     AiVoiceStage::Controls& aiControls() { return aiControls_; }
     const AiVoiceStage::Controls& aiControls() const { return aiControls_; }
+    AiVoiceStage::Controls& fxAiControls() { return fxAiControls_; }
+    const AiVoiceStage::Controls& fxAiControls() const { return fxAiControls_; }
     bool aiEnabled() const { return aiControls_.enabled.load(std::memory_order_relaxed); }
     int aiUnderruns() const { return aiStage_.underruns(); }
     double aiLatencyMs() const { return aiStage_.latencyMs(); }
     // Wakes the AI worker after a model load/provider change (control thread).
-    void notifyAiWorker() { aiStage_.notifyWorker(); }
+    void notifyAiWorker() {
+        aiStage_.notifyWorker();
+        fxAiStage_.notifyWorker();
+    }
 
     // Voice-activity gate: silence threshold in dBFS (-60..-20, default -48).
     // The gate only sleeps the voice branch (DSP + AI); the soundboard keeps
@@ -150,8 +174,9 @@ public:
     bool vadSleeping() const { return vadSleeping_.load(std::memory_order_relaxed); }
 
     // Control threads: wait until all submitted commands have been applied
-    // by the playback callback (queue empty + one audio block passed).
-    void drainCommands(int timeoutMs = 200);
+    // by the playback callback (queue empty + one audio block passed). False
+    // means the caller must not replace snapshots referenced by the callback.
+    bool drainCommands(int timeoutMs = 200);
 
     // Lock-free status meters (any thread).
     float micLevel() const { return micLevel_.load(std::memory_order_relaxed); }
@@ -198,6 +223,8 @@ private:
     // Audio thread: enhancement params follow the active preset.
     void configureEnhancement(const VoicePreset& p);
     void processEnhance(const float* in, float* out, std::size_t frames);
+    void configureFxEnhancement(const VoicePreset& p);
+    void processFxEnhancement(const float* in, float* out, std::size_t frames);
 
     const SoundBank& bank_;
     ma_context ctx_{};
@@ -223,6 +250,7 @@ private:
     std::size_t curMonitorIdx_ = std::size_t(-1);
 
     // Audio plumbing.
+    std::recursive_mutex controlMtx_; // serialises command producers and snapshot mutations
     CommandQueue queue_;
     RingBuffer micRing_{kMicRingSamples};
     RingBuffer monitorRing_{kMonitorRingSamples};
@@ -235,6 +263,8 @@ private:
     std::atomic<bool> bypass_{true};
     std::atomic<int> latencyMode_{0};
     std::atomic<bool> ducking_{false};
+    std::atomic<bool> ambientOn_{true};
+    std::atomic<bool> soundFxSend_{false};
     std::atomic<bool> dspOn_{true};
     std::atomic<float> micLevel_{0.0f};
     std::atomic<std::uint64_t> capOverflows_{0};
@@ -266,14 +296,21 @@ private:
     // Audio-thread scratch (fixed size - the callback never allocates).
     float micBlock_[kMaxBlockFrames * kChannels] = {};
     float dspBlock_[kMaxBlockFrames * kChannels] = {};
+    float soundBlock_[kMaxBlockFrames * kChannels] = {};
+    float fxEnhBlock_[kMaxBlockFrames * kChannels] = {};
+    float fxAiBlock_[kMaxBlockFrames * kChannels] = {};
+    float fxDspBlock_[kMaxBlockFrames * kChannels] = {};
+    float ambientBlock_[kMaxBlockFrames * kChannels] = {};
     float monBlock_[kMaxBlockFrames * kChannels] = {};
     float duck_ = 1.0f;  // audio-thread only
     float dspFade_ = 0.0f; // audio-thread only
+    float fxSendGain_ = 0.0f; // audio-thread only, click-free send enable
     // VAD / sleep state (audio thread owns the counters; atomics are read by UI).
     std::atomic<float> vadThresholdLinear_{0.003981f}; // -48 dBFS
     std::atomic<bool> vadSleeping_{false};
     std::uint64_t vadQuietFrames_ = 0;
     bool vadSleepState_ = false;
+    bool vadPhraseActive_ = false; // distinguishes real speech from startup silence
     float vadWakeGain_ = 0.0f; // 10 ms fade-in after wake (audio thread)
     double micTargetFrames_ = double(kMicTargetFillFrames);
     std::uint64_t lastClockCap_ = 0;  // audio thread: callback-rate sampling
@@ -281,13 +318,25 @@ private:
 
     // Voice chain (audio-thread only) + preset storage (immutable at runtime).
     VoiceProcessor voice_{double(kSampleRate)};
+    // Independent state for soundboard FX Send: the mic and soundboard may be
+    // processed at the same time without sharing Stretch/reverb/delay history.
+    VoiceProcessor fxVoice_{double(kSampleRate)};
     std::vector<VoicePreset> presets_;
+    std::vector<std::shared_ptr<const Sound>> presetAmbients_;
+    AmbientPlayer ambient_;
 
     // AI voice: shared models + the lock-free worker bridge.
     VoiceLibrary aiLib_;
     AiVoiceService aiService_;
     AiVoiceStage::Controls aiControls_{};
     AiVoiceStage aiStage_;
+    // A second stage feeds the same loaded RVC model from the soundboard. The
+    // service serialises inference; this stage never shares audio-thread state
+    // with the live microphone stage.
+    AiVoiceStage::Controls fxAiControls_{};
+    AiVoiceStage fxAiStage_;
+    std::uint64_t fxSoundTailFrames_ = 0; // DSP delay/reverb tail
+    std::uint64_t fxAiTailFrames_ = 0;    // shorter RVC worker tail
 
     // Engine-level enhancement, applied before the AI stage and the character
     // chain (gate + compressor + rumble cut + timbre shelves + 8-band EQ).
@@ -306,6 +355,18 @@ private:
     float enhR_[kMaxBlockFrames] = {};
     float enhOutL_[kMaxBlockFrames] = {};
     float enhOutR_[kMaxBlockFrames] = {};
+
+    // Soundboard enhancement is separate from the mic path. The noise gate is
+    // intentionally open for clips; EQ/timbre/compression still follow the
+    // current character.
+    Iir::RBJ::HighPass fxEnhHpf_[2];
+    Iir::RBJ::LowShelf fxEnhShelfLow_[2];
+    Iir::RBJ::HighShelf fxEnhShelfHigh_[2];
+    float fxEqCoef_[8][2][5] = {};
+    float fxEqX_[8][2][3] = {};
+    float fxEqY_[8][2][3] = {};
+    float fxEqGains_[8] = {};
+    signalsmith::basics::DynamicsFloat fxEnhDyn_;
 };
 
 } // namespace vd

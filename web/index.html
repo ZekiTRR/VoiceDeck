@@ -40,6 +40,8 @@
     <div class="side-foot">
       <div class="switch-row"><span>Голос</span><button id="powerBtn" class="switch" aria-label="Голос вкл/выкл"></button></div>
       <div class="switch-row"><span>AI</span><button id="aiPowerBtn" class="switch" aria-label="AI вкл/выкл"></button></div>
+      <div class="switch-row" title="Фоновые эмбиенты пресетов звучат только во время речи (VAD)">
+        <span>Эмбиент</span><button id="ambientPowerBtn" class="switch" aria-label="Фоновые эмбиенты вкл/выкл"></button></div>
       <div class="switch-row" title="Слышать свой голос с эффектами на оригинальном выходе">
         <span>Предпросмотр</span><button id="monitorBtn" class="switch" aria-label="Предпрослушивание голоса"></button></div>
     </div>
@@ -84,30 +86,38 @@
               <button class="btn" id="peClose" aria-label="Закрыть">✕</button>
             </div>
             <div class="row"><span>Имя</span><input type="text" id="peName" maxlength="30"></div>
-            <div class="row"><span>Питч</span><input type="range" id="pePitch" min="-24" max="24" step="1" value="0"><output class="mono" id="pePitchVal">0</output></div>
-            <div class="row"><span>Форманта</span><input type="range" id="peFormant" min="-24" max="24" step="1" value="0"><output class="mono" id="peFormantVal">0</output></div>
+            <div class="row module-control" data-module="pitch"><span>Питч</span><input type="range" id="pePitch" min="-24" max="24" step="1" value="0"><output class="mono" id="pePitchVal">0</output></div>
+            <div class="row module-control" data-module="formant"><span>Форманта</span><input type="range" id="peFormant" min="-24" max="24" step="1" value="0"><output class="mono" id="peFormantVal">0</output></div>
             <div class="row"><span>Тембр</span><input type="range" id="peTimbre" min="-1" max="1" step="0.1" value="0"><output class="mono" id="peTimbreVal">0.0</output></div>
             <div class="row"><span>Сила</span><input type="range" id="peStrength" min="0" max="1" step="0.05" value="1"><output class="mono" id="peStrengthVal">1.00</output></div>
             <div class="row"><span>Пространство</span>
               <select id="peSpace"><option value="none">нет</option><option value="room">комната</option><option value="hall">зал</option><option value="cave">пещера</option><option value="helmet">шлем</option><option value="radio">радио</option><option value="megaphone">мегафон</option></select></div>
             <div class="row"><span>Эффект</span>
               <select id="peEffect"><option value="none">нет</option><option value="robot">робот</option><option value="alien">пришелец</option><option value="atari">atari</option><option value="clone">клон</option><option value="silence">тишина</option></select></div>
+            <div class="ambient-section">
+              <span class="panel-title">Фоновый эмбиент · VAD</span>
+              <div class="row"><span>Луп</span><select id="peAmbient">
+                <option value="none">нет</option><option value="radio">радиошум + писк</option>
+                <option value="pilot">гул кабины</option><option value="cave">ветер пещеры</option>
+              </select></div>
+              <div class="row"><span>Уровень</span><input type="range" id="peAmbientGain" min="0" max="100" step="1" value="18"><output class="mono" id="peAmbientGainVal">18%</output></div>
+              <button class="btn full" id="peAmbientFile">Загрузить свой эмбиент…</button>
+              <div class="note">Луп и писк конца фразы слышны только пока VAD слышит тебя. Общий выключатель — в левой панели.</div>
+            </div>
             <div class="chain-section">
-              <span class="panel-title">Цепочка эффектов</span>
-              <div id="peChainList" class="chain-list"></div>
-              <div class="chain-add">
-                <select id="peChainSel">
-                  <option value="">— выбери эффект —</option>
-                  <option value="room">комната</option><option value="hall">зал</option>
-                  <option value="cave">пещера</option><option value="helmet">шлем</option>
-                  <option value="radio">радио</option><option value="megaphone">мегафон</option>
-                  <option value="robot">робот</option><option value="alien">пришелец</option>
-                  <option value="atari">atari</option><option value="clone">клон</option>
-                </select>
-                <button class="btn" id="peAddChain">+ в цепочку</button>
+              <div class="section-heading"><span class="panel-title">VoiceLab · цепочка эффектов</span><span class="live-badge">LIVE</span></div>
+              <div class="note" style="margin:0 0 8px">Перетаскивай блоки за ручку. Стрелки — альтернатива для клавиатуры, шестерёнка — параметры блока.</div>
+              <div id="peChainList" class="chain-list" role="list" aria-label="Цепочка эффектов"></div>
+              <div id="peModulePalette" class="module-palette" aria-label="Добавить модуль"></div>
+              <div id="peModuleParams" class="module-params hidden" role="region" aria-labelledby="peModuleParamsTitle">
+                <div class="section-heading">
+                  <span class="panel-title" id="peModuleParamsTitle">Параметры</span>
+                  <button type="button" class="s-ctl" id="peModuleParamsClose" aria-label="Закрыть параметры">×</button>
+                </div>
+                <div id="peModuleParamsBody"></div>
               </div>
             </div>
-            <div class="eq-section">
+            <div class="eq-section module-control" data-module="eq">
               <span class="panel-title">Эквалайзер</span>
               <div class="eq-sliders" id="peEq"></div>
             </div>
@@ -126,6 +136,9 @@
             <svg viewBox="0 0 24 24" class="search-icon"><circle cx="10" cy="10" r="6"/><path d="M15 15l5 5"/></svg>
             <input type="text" id="soundSearch" placeholder="имя или тег..." class="search-input">
           </div>
+          <label class="tool fx-send" title="Пропускать саундборд через текущий пресет голоса и RVC">
+            <span>Через пресет</span><span class="mono fx-preset-name" id="fxPresetLabel"></span><button id="fxSendBtn" class="switch" aria-label="Пропускать саундборд через пресет"></button>
+          </label>
           <span class="spacer"></span>
           <button class="s-ctl on" id="viewGrid" aria-label="Карточки"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/></svg></button>
           <button class="s-ctl" id="viewList" aria-label="Список"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
