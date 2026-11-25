@@ -890,6 +890,13 @@ void UiApp::handleMessage(const std::string& jsonText) {
         pushState();
         return;
     }
+    if (cmd == "soundboardMonitor") {
+        const std::size_t idx = j.value("idx", std::size_t(SIZE_MAX));
+        if (!app_.setSoundboardMonitor(j.value("on", false), idx))
+            notify("включи оригинальный выход в настройках");
+        pushState();
+        return;
+    }
     if (cmd == "setPresetAmbient") {
         const std::string err = app_.setPresetAmbient(j.value("idx", -1), j);
         if (!err.empty()) notify(err);
@@ -1005,8 +1012,10 @@ void UiApp::handleMessage(const std::string& jsonText) {
         return;
     }
     if (cmd == "preview") {
-        const std::string err = app_.previewSound(j.at("id").get<std::uint64_t>());
+        const std::size_t idx = j.value("idx", std::size_t(SIZE_MAX));
+        const std::string err = app_.previewSound(j.at("id").get<std::uint64_t>(), idx);
         if (!err.empty()) log::error("preview failed: %s", err.c_str());
+        pushState(); // sync the original-output selector and monitor state
         return;
     }
     if (cmd == "stopPreview") {
@@ -1087,6 +1096,10 @@ void UiApp::handleMessage(const std::string& jsonText) {
             app_.hotkeys.bindVoiceToggle("");
         else if (target == "ai")
             app_.hotkeys.bindAiToggle("");
+        else if (target == "stopall")
+            app_.hotkeys.bindStopAll("");
+        else if (target == "preset")
+            app_.hotkeys.bindPreset(j.at("idx").get<std::uint64_t>(), "");
         else if (target == "sound")
             err = app_.bindSoundHotkey(j.at("id").get<std::uint64_t>(), "");
         app_.saveAll();
@@ -1256,7 +1269,16 @@ void UiApp::handleMessage(const std::string& jsonText) {
     }
     if (cmd == "monitor") {
         const std::size_t idx = j.value("idx", std::size_t(SIZE_MAX));
-        app_.setMonitor(j.value("on", true), idx);
+        if (j.value("on", true) && !app_.setMonitor(true, idx))
+            notify("включи оригинальный выход в настройках");
+        else if (!j.value("on", true))
+            app_.setMonitor(false, idx);
+        pushState();
+        return;
+    }
+    if (cmd == "monitorOutput") {
+        if (!app_.setMonitorOutput(j.value("idx", std::size_t(SIZE_MAX))))
+            notify("не удалось открыть выбранный оригинальный выход");
         pushState();
         return;
     }

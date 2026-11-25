@@ -34,7 +34,8 @@ public:
     void stop();
 
     // Bind "Ctrl+Alt+1"-style combos. Rebinding the same target replaces the
-    // old combo. Return "" on success, else a human-readable error.
+    // old combo; an empty combo clears it. Return "" on success, else a
+    // human-readable error.
     std::string bindSound(std::uint64_t soundId, const std::string& combo);
     std::string bindPreset(std::uint64_t presetIndex, const std::string& combo);
     std::string bindStopAll(const std::string& combo);

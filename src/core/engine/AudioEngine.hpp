@@ -99,6 +99,8 @@ public:
     bool duckingOn() const { return ducking_.load(std::memory_order_relaxed); }
     bool ambientEnabled() const { return ambientOn_.load(std::memory_order_relaxed); }
     bool soundFxSend() const { return soundFxSend_.load(std::memory_order_relaxed); }
+    bool soundboardMonitor() const { return soundboardMonitor_.load(std::memory_order_relaxed); }
+    bool voiceMonitorOn() const { return monitorVoice_.load(std::memory_order_relaxed); }
 
     // Voice presets: set once from the control side before audio starts.
     // Entries are immutable afterwards; the audio thread only reads them via
@@ -265,6 +267,8 @@ private:
     std::atomic<bool> ducking_{false};
     std::atomic<bool> ambientOn_{true};
     std::atomic<bool> soundFxSend_{false};
+    std::atomic<bool> soundboardMonitor_{false};
+    std::atomic<bool> monitorVoice_{false};
     std::atomic<bool> dspOn_{true};
     std::atomic<float> micLevel_{0.0f};
     std::atomic<std::uint64_t> capOverflows_{0};
@@ -296,7 +300,9 @@ private:
     // Audio-thread scratch (fixed size - the callback never allocates).
     float micBlock_[kMaxBlockFrames * kChannels] = {};
     float dspBlock_[kMaxBlockFrames * kChannels] = {};
+    float voiceBlock_[kMaxBlockFrames * kChannels] = {};
     float soundBlock_[kMaxBlockFrames * kChannels] = {};
+    float soundboardBlock_[kMaxBlockFrames * kChannels] = {};
     float fxEnhBlock_[kMaxBlockFrames * kChannels] = {};
     float fxAiBlock_[kMaxBlockFrames * kChannels] = {};
     float fxDspBlock_[kMaxBlockFrames * kChannels] = {};

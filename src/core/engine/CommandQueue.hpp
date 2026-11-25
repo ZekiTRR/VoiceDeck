@@ -24,6 +24,8 @@ struct Command {
         SetAmbient,     // value != 0 -> VAD-gated preset ambience master
         SetAmbientPreset, // soundId=index, value=kind, valueB=gain
         SetSoundFx,     // value != 0 -> soundboard through current voice/RVC
+        SetSoundboardMonitor, // value != 0 -> main soundboard to original output
+        SetMonitorVoice,      // value != 0 -> processed voice to original output
         SetPreset,      // soundId = voice preset index
         SetDsp,         // value != 0 -> voice DSP chain on
         SetTransposeOverride, // value = semitones, soundId != 0 -> enable

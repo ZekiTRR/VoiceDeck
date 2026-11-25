@@ -225,6 +225,7 @@ void App::init() {
         engine.submit(c);
     }
     applyAiSettings();
+    if (settings.soundboardMonitor) setSoundboardMonitor(true);
 }
 
 void App::applyAiSettings() {
@@ -905,13 +906,91 @@ std::string App::setAiProvider(const std::string& name) {
 
 // ---------------------------------------------------------------- routing
 
+std::size_t App::resolveMonitorIdx(std::size_t playbackIdx) const {
+    const auto& plays = engine.playbackDevices();
+    if (playbackIdx != SIZE_MAX)
+        return playbackIdx < plays.size() ? playbackIdx : SIZE_MAX;
+    if (!settings.monitorDevice.empty()) {
+        for (std::size_t i = 0; i < plays.size(); ++i)
+            if (plays[i].name == settings.monitorDevice) return i;
+    }
+    for (std::size_t i = 0; i < plays.size(); ++i)
+        if (plays[i].isDefault) return i;
+    return plays.empty() ? SIZE_MAX : 0;
+}
+
+void App::applyMonitorCommands() {
+    Command voice;
+    voice.type = Command::Type::SetMonitorVoice;
+    voice.value = voiceMonitorOn_ ? 1.0f : 0.0f;
+    engine.submit(voice);
+
+    Command soundboard;
+    soundboard.type = Command::Type::SetSoundboardMonitor;
+    soundboard.value = settings.soundboardMonitor ? 1.0f : 0.0f;
+    engine.submit(soundboard);
+}
+
+void App::updateMonitorMode() {
+    engine.monitorPreviewOnly_.store(!voiceMonitorOn_ && !settings.soundboardMonitor,
+                                     std::memory_order_relaxed);
+}
+
+bool App::ensureMonitor(std::size_t playbackIdx, bool restart) {
+    if (!engine.isRunning()) return false;
+    if (engine.monitorRunning() && !restart) {
+        applyMonitorCommands();
+        return true;
+    }
+
+    const std::size_t idx = resolveMonitorIdx(playbackIdx);
+    if (idx == SIZE_MAX) return false;
+    const std::size_t oldIdx = engine.monitorRunning() ? engine.currentMonitorIdx() : SIZE_MAX;
+    std::string err;
+    if (!engine.startMonitor(idx, err)) {
+        // A failed output change must not cut off voice/preview/soundboard
+        // monitoring that was already working on the previous device.
+        if (oldIdx != SIZE_MAX && oldIdx != idx && engine.startMonitor(oldIdx, err)) {
+            settings.monitorDevice = engine.playbackDevices()[oldIdx].name;
+            settings.save(settingsFile);
+            applyMonitorCommands();
+            return true;
+        }
+        return false;
+    }
+    settings.monitorDevice = engine.playbackDevices()[idx].name;
+    settings.save(settingsFile);
+    applyMonitorCommands();
+    return true;
+}
+
+void App::reconcileMonitor() {
+    updateMonitorMode();
+    applyMonitorCommands();
+    engine.drainCommands();
+    const bool needed = voiceMonitorOn_ || previewActive_ || settings.soundboardMonitor;
+    if (!needed && engine.monitorRunning()) {
+        engine.stopMonitor();
+    } else if (needed && !engine.monitorRunning()) {
+        ensureMonitor(SIZE_MAX, false);
+    }
+}
+
 void App::selectDevices(std::size_t captureIdx, std::size_t playbackIdx) {
     std::string err;
     if (engine.start(captureIdx, playbackIdx, err)) {
         settings.captureDevice = engine.captureDevices()[captureIdx].name;
         settings.playbackDevice = engine.playbackDevices()[playbackIdx].name;
-        settings.monitorDevice.clear();
+        // Keep monitorDevice: changing the microphone/cable route must not
+        // silently move the user's original output.
         settings.save(settingsFile);
+        if (voiceMonitorOn_ && !setMonitor(true)) voiceMonitorOn_ = false;
+        if (settings.soundboardMonitor && !setSoundboardMonitor(true))
+            log::warn("soundboard monitor was not restored after device change");
+        if (previewActive_ && !engine.monitorRunning()) {
+            updateMonitorMode();
+            ensureMonitor(SIZE_MAX, false);
+        }
     } else {
         log::error("select failed: %s", err.c_str());
     }
@@ -919,37 +998,64 @@ void App::selectDevices(std::size_t captureIdx, std::size_t playbackIdx) {
 
 bool App::setMonitor(bool on, std::size_t playbackIdx) {
     if (!on) {
-        engine.stopMonitor();
+        voiceMonitorOn_ = false;
+        reconcileMonitor();
         // Keep the chosen device so toggling monitoring back on restores the
-        // SAME output instead of falling back to the system default (which is
-        // often the virtual cable and therefore silent to the user).
+        // SAME output instead of falling back to the system default.
         return false;
     }
     if (!engine.isRunning()) return false;
-    engine.monitorPreviewOnly_.store(false); // user explicitly wants full monitoring
-    std::size_t idx = playbackIdx;
-    if (idx == SIZE_MAX) {
-        const auto& plays = engine.playbackDevices();
-        if (!settings.monitorDevice.empty()) {
-            for (std::size_t i = 0; i < plays.size(); ++i)
-                if (plays[i].name == settings.monitorDevice) {
-                    idx = i;
-                    break;
-                }
-        }
-        if (idx == SIZE_MAX) {
-            for (std::size_t i = 0; i < plays.size(); ++i)
-                if (plays[i].isDefault) {
-                    idx = i;
-                    break;
-                }
-        }
-        if (idx == SIZE_MAX && !plays.empty()) idx = 0;
+    const bool restart = !engine.monitorRunning() ||
+                         (playbackIdx != SIZE_MAX && playbackIdx != engine.currentMonitorIdx());
+    voiceMonitorOn_ = true;
+    updateMonitorMode();
+    if (!ensureMonitor(playbackIdx, restart)) {
+        voiceMonitorOn_ = false;
+        updateMonitorMode();
+        applyMonitorCommands();
+        return false;
     }
-    if (idx == SIZE_MAX || idx >= engine.playbackDevices().size()) return false;
-    std::string err;
-    if (!engine.startMonitor(idx, err)) return false;
-    settings.monitorDevice = engine.playbackDevices()[idx].name;
+    return true;
+}
+
+bool App::setMonitorOutput(std::size_t playbackIdx) {
+    if (playbackIdx == SIZE_MAX) return false;
+    const std::size_t idx = resolveMonitorIdx(playbackIdx);
+    if (idx == SIZE_MAX) return false;
+    const bool needed = voiceMonitorOn_ || previewActive_ || settings.soundboardMonitor;
+    if (!needed) {
+        // Remember the user's choice without opening a monitor device.
+        settings.monitorDevice = engine.playbackDevices()[idx].name;
+        settings.save(settingsFile);
+        return true;
+    }
+    updateMonitorMode();
+    if (!ensureMonitor(idx, true)) return false;
+    // ensureMonitor may have restored the previous device after a failed open.
+    return engine.currentMonitorIdx() == idx;
+}
+
+bool App::setSoundboardMonitor(bool on, std::size_t playbackIdx) {
+    if (!on) {
+        settings.soundboardMonitor = false;
+        settings.save(settingsFile);
+        reconcileMonitor();
+        return true;
+    }
+
+    const bool previous = settings.soundboardMonitor;
+    settings.soundboardMonitor = true;
+    updateMonitorMode();
+    const bool restart = engine.monitorRunning() && playbackIdx != SIZE_MAX &&
+                         playbackIdx != engine.currentMonitorIdx();
+    if (!ensureMonitor(playbackIdx, restart)) {
+        // Explicit enables roll back so the UI does not claim to monitor a
+        // device that failed to open. A persisted restore keeps its intent.
+        settings.soundboardMonitor = previous;
+        updateMonitorMode();
+        applyMonitorCommands();
+        return false;
+    }
     settings.save(settingsFile);
     return true;
 }
@@ -1086,20 +1192,25 @@ std::string App::removePreset(int idx) {
     return "";
 }
 
-std::string App::previewSound(std::uint64_t id) {
+std::string App::previewSound(std::uint64_t id, std::size_t playbackIdx) {
     if (!bank.find(id)) return "no sound";
-    if (!engine.monitorRunning()) {
-        // Preview starts the monitor in PREVIEW-ONLY mode (no self-monitoring).
-        std::size_t idx = SIZE_MAX;
-        if (!settings.monitorDevice.empty()) {
-            const auto& plays = engine.playbackDevices();
-            for (std::size_t i = 0; i < plays.size(); ++i)
-                if (plays[i].name == settings.monitorDevice) { idx = i; break; }
-        }
-        if (!setMonitor(true, idx))
-            return "включи оригинальный выход в настройках";
-        engine.monitorPreviewOnly_.store(true);
-        monitorStartedForPreview_ = true;
+    const bool restart = engine.monitorRunning() && playbackIdx != SIZE_MAX &&
+                         playbackIdx != engine.currentMonitorIdx();
+    previewActive_ = true;
+    updateMonitorMode();
+    if (!ensureMonitor(playbackIdx, restart)) {
+        previewActive_ = false;
+        updateMonitorMode();
+        applyMonitorCommands();
+        return "включи оригинальный выход в настройках";
+    }
+    if (playbackIdx != SIZE_MAX && engine.currentMonitorIdx() != playbackIdx) {
+        // ensureMonitor restored the previous device after the requested one
+        // failed to open. Do not start a preview that silently uses another
+        // output; reconcile the monitor and let the UI restore its selection.
+        previewActive_ = false;
+        reconcileMonitor();
+        return "не удалось открыть выбранный оригинальный выход";
     }
     Command c;
     c.type = Command::Type::PreviewSound;
@@ -1109,18 +1220,13 @@ std::string App::previewSound(std::uint64_t id) {
 }
 
 void App::stopPreview() {
+    previewActive_ = false;
     Command c;
     c.type = Command::Type::StopPreview;
     engine.submit(c);
-    // Preview-only mode suppresses the voice in the monitor. Restore the
-    // previous state as soon as the preview voice is stopped, otherwise
-    // self-monitoring ("voice preview") silently stops working.
-    if (monitorStartedForPreview_) {
-        monitorStartedForPreview_ = false;
-        engine.stopMonitor(); // do NOT clear settings.monitorDevice
-    } else if (engine.monitorRunning() && engine.monitorPreviewOnly_.load()) {
-        engine.monitorPreviewOnly_.store(false);
-    }
+    // Keep the device only while voice, soundboard or another preview needs
+    // it; otherwise restore the pre-preview silent state.
+    reconcileMonitor();
 }
 
 std::pair<std::size_t, std::size_t> App::refreshSounds() {
@@ -1233,7 +1339,17 @@ std::string App::setLatencyMode(int mode) {
     settings.save(settingsFile);
     if (running && cap != std::size_t(-1) && play != std::size_t(-1)) {
         std::string err;
-        if (!engine.start(cap, play, err)) log::warn("latency restart failed: %s", err.c_str());
+        if (!engine.start(cap, play, err)) {
+            log::warn("latency restart failed: %s", err.c_str());
+        } else {
+            if (voiceMonitorOn_ && !setMonitor(true)) voiceMonitorOn_ = false;
+            if (settings.soundboardMonitor && !setSoundboardMonitor(true))
+                log::warn("soundboard monitor was not restored after latency change");
+            if (previewActive_ && !engine.monitorRunning()) {
+                updateMonitorMode();
+                ensureMonitor(SIZE_MAX, false);
+            }
+        }
     }
     return "";
 }
@@ -1379,8 +1495,12 @@ nlohmann::json App::statusJson() const {
     // one-callback race where a UI refresh could briefly show the old value.
     j["ambientOn"] = settings.ambientEnabled;
     j["soundFxSend"] = settings.soundFxSend;
+    j["soundboardMonitor"] = settings.soundboardMonitor;
     j["language"] = settings.language;
     j["monitorOn"] = engine.monitorRunning();
+    // App-side desired state is synchronous, unlike the audio-thread flag.
+    // Preview-only mode never reports the suppressed voice send as enabled.
+    j["voiceMonitorOn"] = voiceMonitorOn_ && engine.monitorRunning();
     j["preset"] = engine.voicePresetIndex();
 
     // Custom ambience library for the preset editor. Files are discovered in
@@ -1554,6 +1674,12 @@ nlohmann::json App::statusJson() const {
     // currentMonitorIdx() is size_t(-1) when the monitor is off — serializing
     // that as a huge unsigned value makes the UI checkbox look "on".
     devices["curMonitor"] = engine.monitorRunning() ? int(engine.currentMonitorIdx()) : -1;
+    int savedMonitor = -1;
+    if (!settings.monitorDevice.empty()) {
+        for (std::size_t i = 0; i < plays.size(); ++i)
+            if (plays[i].name == settings.monitorDevice) { savedMonitor = int(i); break; }
+    }
+    devices["savedMonitor"] = savedMonitor;
     devices["running"] = engine.isRunning();
     j["devices"] = std::move(devices);
 
@@ -1568,7 +1694,9 @@ nlohmann::json App::statusJson() const {
     j["playbackPeriod"] = engine.actualPlaybackPeriodFrames();
     j["captureRate"] = engine.actualCaptureSampleRate();
     j["playbackRate"] = engine.actualPlaybackSampleRate();
-    j["hotkeys"] = {{"voice", hotkeys.voiceToggleCombo()}, {"ai", hotkeys.aiToggleCombo()}};
+    j["hotkeys"] = {{"voice", hotkeys.voiceToggleCombo()},
+                    {"ai", hotkeys.aiToggleCombo()},
+                    {"stopAll", hotkeys.stopAllCombo()}};
     nlohmann::json allTags = nlohmann::json::array();
     for (const std::string& t : bank.allTags()) allTags.push_back(t);
     j["allTags"] = std::move(allTags);

@@ -225,6 +225,13 @@ void HotkeyManager::showTrayMenu() {
 
 std::string HotkeyManager::bindInternal(const HotkeyAction& action, const std::string& combo) {
     if (!running_.load(std::memory_order_relaxed)) return "hotkey service is not running";
+    // An empty combo is the explicit unbind operation used by the UI. Keep it
+    // here so every target (voice, AI, stop-all, preset and sound) has the same
+    // persistence and unregistration semantics.
+    if (combo.empty()) {
+        unbindInternal(action);
+        return "";
+    }
     std::uint32_t mods = 0;
     std::uint32_t vk = 0;
     std::string err;

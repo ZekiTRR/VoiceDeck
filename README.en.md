@@ -8,8 +8,8 @@
 
 ## Features
 
-- **Soundboard** — card/list views, waveform with seeking, volume, loop, hotkeys, preview to your speakers. Drag & drop adds a whole batch at once and copies files into `data\sounds`.
-- **Tags & search** — custom tags per clip, search by name or tag, tag filter chips. The built-in `hotkey` tag is added automatically whenever a sound gets a hotkey.
+- **Soundboard** — card/list views, waveform with seeking, volume, loop, removable hotkeys, speaker preview and a separate “Hear sounds” toggle for monitoring the main soundboard. Drag & drop adds a whole batch at once and copies files into `data\sounds`.
+- **Tags & search** — custom tags per clip, search by name or tag, tag filter chips. The built-in `hotkey` tag is added when a shortcut is assigned and removed automatically when it is cleared.
 - **Audio editor** — quick trim, global gain and per-region gain changes right in the app. Edits are non-destructive: the source file stays untouched, parameters live in `sounds.json`.
 - **Windows startup** — launch with Windows and an "always run as administrator" mode (UAC relaunch).
 - **Low latency & idle** — 256/480/960 buffer modes, an adaptive jitter buffer for virtual-cable clock drift, VAD sleep for the voice branch (the soundboard keeps playing) with AI pre-roll, and a zero-latency soft clipper. The silence threshold is adjustable on the Voice tab.

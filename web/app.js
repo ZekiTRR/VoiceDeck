@@ -309,7 +309,7 @@ function demoState(){
       custom:i===5,hotkey:i===5?"Ctrl+Alt+F1":"",eq:[0,0,0,0,0,0,0,0],chain:[],
       ambient:i===10?"radio":i===13?"cave":"none",ambientGain:i===10?0.2:0.18}));
   const pk=[];for(let i=0;i<256;i++)pk.push(0.3+0.6*Math.abs(Math.sin(i*0.08)*Math.cos(i*0.03)));
-  return {type:"state",language:vdLocale,dspOn:true,bypassOn:true,duckingOn:false,ambientOn:true,soundFxSend:false,monitorOn:false,preset:2,presets:P,
+  return {type:"state",language:vdLocale,dspOn:true,bypassOn:true,duckingOn:false,ambientOn:true,soundFxSend:false,soundboardMonitor:false,monitorOn:false,voiceMonitorOn:false,preset:2,presets:P,
     sounds:[{id:1,name:"airhorn",dur:2.1,gain:1,loop:false,hotkey:"Ctrl+Alt+1",eq:[0,0,0,0,0],peaks:pk,
       rawPeaks:pk,sourceDur:2.1,tags:["hotkey","сигнал"],edits:{trimStart:0,trimEnd:0,gain:1,regions:[]}},
       {id:2,name:"bell",dur:1.2,gain:0.8,loop:false,hotkey:"",eq:[0,0,0,0,0],peaks:pk,
@@ -322,9 +322,9 @@ function demoState(){
       voices:[{name:"Narrator (male)",gender:"male",pitch:0},{name:"Presenter (female)",gender:"female",pitch:12}]},
     devices:{capture:[{idx:0,name:"Микрофон (USB)",def:true}],
       playback:[{idx:0,name:"Line 1 (VAC)",def:true},{idx:1,name:"Динамики",def:false}],
-      curCapture:0,curPlayback:0,curMonitor:-1,running:true},
+      curCapture:0,curPlayback:0,curMonitor:-1,savedMonitor:-1,running:true},
     mic:0.03,voiceLatency:0,e2eLatency:47,micUnderruns:0,latencyMode:0,
-    vadThresholdDb:-48,vadSleeping:false,hotkeys:{voice:"Ctrl+Alt+V",ai:""}};
+    vadThresholdDb:-48,vadSleeping:false,hotkeys:{voice:"Ctrl+Alt+V",ai:"",stopAll:""}};
 }
 
 function setSwitch(el,on){el.classList.toggle("on",!!on);el.setAttribute("aria-pressed",String(!!on));}
@@ -338,14 +338,31 @@ function updateTopLive(){if(!S)return;
   if(S.vadSleeping)p.push("VAD sleep");
   $("topLive").textContent=p.join("   ·   ");}
 
+function renderHotkeyBadges(){
+  if(!S)return;
+  const hk=S.hotkeys||{};
+  $("hkVoice").textContent=hk.voice||"— клик —";
+  $("hkAi").textContent=hk.ai||"— клик —";
+  $("hkStopAll").textContent=hk.stopAll||"— клик —";
+}
+
+function syncOriginalOutputSelection(){
+  if(!S||!S.devices)return;
+  const d=S.devices,idx=d.curMonitor>=0?d.curMonitor:d.savedMonitor;
+  if(idx>=0)$("origSelect").value=String(idx);
+}
+
 function renderState(){
   if(!S)return;
   setSwitch($("powerBtn"),S.dspOn&&S.bypassOn);setSwitch($("aiPowerBtn"),S.ai.enabled);
   setSwitch($("ambientPowerBtn"),S.ambientOn);setSwitch($("fxSendBtn"),S.soundFxSend);
   $("fxPresetLabel").textContent=S.presets[S.preset]?S.presets[S.preset].name:"";
   $("uiLanguage").value=S.language||vdLocale;
-  setSwitch($("monitorBtn"),S.devices.curMonitor>=0);
-  renderPresets();renderTagFilter();renderSounds();renderAi();
+  setSwitch($("monitorBtn"),!!S.voiceMonitorOn);
+  $("monitorChk").checked=!!S.voiceMonitorOn;
+  setSwitch($("soundboardMonitorBtn"),!!S.soundboardMonitor);
+  syncOriginalOutputSelection();
+  renderPresets();renderTagFilter();renderSounds();renderAi();renderHotkeyBadges();
   if(!settingsRenderedOnce){renderSettings();settingsRenderedOnce=true;}
   if(S.vadThresholdDb!=null&&document.activeElement!==$("vadThreshold")){
     $("vadThreshold").value=Math.round(S.vadThresholdDb);
@@ -772,7 +789,7 @@ function stopPreviewNow(){
 // replaces the previous preview.
 function doPreview(s){
   if(previewIds.has(s.id)){stopPreviewNow();return;}
-  send({cmd:"preview",id:s.id});
+  send({cmd:"preview",id:s.id,idx:+$("origSelect").value});
   previewIds.clear();previewIds.add(s.id);updatePreviewButtons();
   clearTimeout(previewTimer);
   previewTimer=setTimeout(()=>{
@@ -1185,8 +1202,8 @@ function renderSettings(){
       o.textContent=it.name+(it.def?"  [сис]":"");if(it.idx===cur)o.selected=true;sel.appendChild(o);}};
   fill($("capSelect"),d.capture,d.curCapture);
   fill($("playSelect"),d.playback,d.curPlayback);
-  fill($("origSelect"),d.playback,d.curMonitor);
-  if(document.activeElement!==$("monitorChk"))$("monitorChk").checked=d.curMonitor>=0;
+  fill($("origSelect"),d.playback,d.curMonitor>=0?d.curMonitor:d.savedMonitor);
+  if(document.activeElement!==$("monitorChk"))$("monitorChk").checked=!!S.voiceMonitorOn;
   $("bypassChk").checked=S.bypassOn;$("duckingChk").checked=S.duckingOn;
   if(S.latencyMode!==undefined)$("latencyMode").value=String(S.latencyMode);
   if(document.activeElement!==$("autoStartChk"))$("autoStartChk").checked=!!S.autoStart;
@@ -1194,8 +1211,6 @@ function renderSettings(){
   $("runNote").textContent=S.elevated
     ? "Приложение сейчас запущено от имени администратора."
     : "При включении «от имени админа» приложение перезапустится с запросом UAC. Настройка действует при каждом запуске.";
-  $("hkVoice").textContent=S.hotkeys.voice||"— клик —";
-  $("hkAi").textContent=S.hotkeys.ai||"— клик —";
   $("routeNote").textContent=d.running?`${d.capture[d.curCapture]?.name||"?"} → ${d.playback[d.curPlayback]?.name||"?"}`:"не запущено";
 }
 
@@ -1344,7 +1359,10 @@ $("uiLanguage").addEventListener("change",e=>{
 });
 $("latencyMode").addEventListener("change",e=>{send({cmd:"setLatencyMode",mode:+e.target.value});
   toast("Задержка изменена");settingsRenderedOnce=false;});
-$("origSelect").addEventListener("change",e=>{if($("monitorChk").checked&&settingsRenderedOnce)send({cmd:"monitor",on:true,idx:+e.target.value});});
+$("origSelect").addEventListener("change",e=>{
+  if(!settingsRenderedOnce)return;
+  send({cmd:"monitorOutput",idx:+e.target.value});
+});
 $("monitorChk").addEventListener("change",e=>{
   // WebView2 restores form state on restart; ignore the resulting synthetic
   // change so the monitor never turns itself on unexpectedly.
@@ -1355,10 +1373,16 @@ $("monitorChk").addEventListener("change",e=>{
 // Dedicated, always-visible self-monitoring ("voice preview") toggle.
 $("monitorBtn").addEventListener("click",()=>{
   const on=!$("monitorBtn").classList.contains("on");
-  send({cmd:"monitor",on:on}); // no idx → engine uses the saved/default original output
+  send({cmd:"monitor",on,idx:+$("origSelect").value});
   setSwitch($("monitorBtn"),on);
   $("monitorChk").checked=on;
   toast(on?"Предпрослушивание голоса: ВКЛ":"Предпрослушивание голоса: ВЫКЛ");
+});
+$("soundboardMonitorBtn").addEventListener("click",()=>{
+  if(!S)return;
+  const on=!S.soundboardMonitor;send({cmd:"soundboardMonitor",on,idx:+$("origSelect").value});S.soundboardMonitor=on;
+  setSwitch($("soundboardMonitorBtn"),on);
+  toast(on?"Основной саундборд: слышно на оригинальном выходе":"Основной саундборд: только в канал");
 });
 $("applyRoute").addEventListener("click",()=>{send({cmd:"select",cap:+$("capSelect").value,play:+$("playSelect").value});
   toast("Маршрут применён");settingsRenderedOnce=false;});
@@ -1403,6 +1427,14 @@ function uiConfirm(text){
 // Hotkey capture
 function startHkCapture(t){hkTarget=t;$("hkOverlay").classList.remove("hidden");$("hkComboPreview").textContent="…";}
 function endHkCapture(){hkTarget=null;$("hkOverlay").classList.add("hidden");}
+function clearCurrentHotkey(){
+  if(!hkTarget)return;
+  const msg={cmd:"hotkeyOff",target:hkTarget.target};
+  if(hkTarget.id!=null)msg.id=hkTarget.id;
+  if(hkTarget.idx!=null)msg.idx=hkTarget.idx;
+  send(msg);endHkCapture();toast("Хоткей удалён");
+}
+$("hkClear").addEventListener("click",clearCurrentHotkey);
 $("hkCancel").addEventListener("click",endHkCapture);
 document.addEventListener("keydown",e=>{
   if(!hkTarget){
@@ -1415,7 +1447,13 @@ document.addEventListener("keydown",e=>{
         $("convertOverlay").classList.add("hidden");pthCandidate=null;}
       else if(previewIds.size)stopPreviewNow();}
     return;}
+  // Let Tab move focus and Enter/Space activate the dialog buttons. Other
+  // keys are captured as shortcut input (or as explicit removal/cancel keys).
+  if(e.key==="Tab")return;
+  if((e.key==="Enter"||e.key===" ")&&e.target.closest&&e.target.closest("#hkOverlay button"))return;
   e.preventDefault();e.stopPropagation();
+  if(e.key==="Escape"){endHkCapture();return;}
+  if(e.key==="Delete"||e.key==="Backspace"){clearCurrentHotkey();return;}
   const mod=[];if(e.ctrlKey)mod.push("Ctrl");if(e.altKey)mod.push("Alt");
   if(e.shiftKey)mod.push("Shift");if(e.metaKey)mod.push("Win");
   const k=e.key.length===1?e.key.toUpperCase():/^F\d{1,2}$/.test(e.key)?e.key:null;

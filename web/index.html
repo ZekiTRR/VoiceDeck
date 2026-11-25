@@ -139,6 +139,9 @@
           <label class="tool fx-send" title="Пропускать саундборд через текущий пресет голоса и RVC">
             <span>Через пресет</span><span class="mono fx-preset-name" id="fxPresetLabel"></span><button id="fxSendBtn" class="switch" aria-label="Пропускать саундборд через пресет"></button>
           </label>
+          <label class="tool" title="Слышать на оригинальном выходе те же звуки, что уходят в виртуальный кабель">
+            <span>Слышать звуки</span><button id="soundboardMonitorBtn" class="switch" aria-label="Слышать основной саундборд"></button>
+          </label>
           <span class="spacer"></span>
           <button class="s-ctl on" id="viewGrid" aria-label="Карточки"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/></svg></button>
           <button class="s-ctl" id="viewList" aria-label="Список"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
@@ -253,7 +256,10 @@
 <div id="hkOverlay" class="overlay hidden">
   <div class="dialog"><h3>Нажми комбинацию…</h3>
     <div class="combo mono" id="hkComboPreview">…</div>
-    <button class="btn" id="hkCancel">отмена</button></div>
+    <div class="note">Нажми новую комбинацию или Delete/Backspace, чтобы удалить хоткей.</div>
+    <div class="dialog-actions center">
+      <button class="btn danger" id="hkClear">Удалить хоткей</button>
+      <button class="btn" id="hkCancel">отмена</button></div></div>
 </div>
 
 <div id="confirmOverlay" class="overlay hidden">

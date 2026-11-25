@@ -134,6 +134,11 @@ const VD_I18N = {
     "Пропускать саундборд через текущий пресет голоса и RVC": "Route the soundboard through the current voice preset and RVC",
     "Через пресет": "Through preset",
     "Пропускать саундборд через пресет": "Route soundboard through preset",
+    "Слышать звуки": "Hear sounds",
+    "Слышать основной саундборд": "Hear the main soundboard",
+    "Слышать на оригинальном выходе те же звуки, что уходят в виртуальный кабель": "Hear the same sounds on the original output that are sent to the virtual cable",
+    "Основной саундборд: слышно на оригинальном выходе": "Main soundboard: audible on the original output",
+    "Основной саундборд: только в канал": "Main soundboard: cable only",
     "Карточки": "Cards",
     "Список": "List",
     "Подхватить новые и удалённые файлы из папки без перезапуска": "Pick up new and deleted files without restarting",
@@ -251,6 +256,9 @@ const VD_I18N = {
 
     // Dialogs
     "Нажми комбинацию…": "Press a shortcut…",
+    "Нажми новую комбинацию или Delete/Backspace, чтобы удалить хоткей.": "Press a new shortcut, or Delete/Backspace to remove the hotkey.",
+    "Удалить хоткей": "Remove hotkey",
+    "Хоткей удалён": "Hotkey removed",
     "отмена": "cancel",
     "Отмена": "Cancel",
     "Удалить?": "Delete?",

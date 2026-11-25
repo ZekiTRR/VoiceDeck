@@ -319,6 +319,7 @@ bool AudioEngine::startMonitor(std::size_t playbackIdx, std::string& err) {
 
 void AudioEngine::stopMonitor() {
     monitorActive_.store(false, std::memory_order_relaxed);
+    monitorVoice_.store(false, std::memory_order_relaxed);
     if (monRunning_) {
         ma_device_uninit(&monDev_);
         monRunning_ = false;
@@ -447,6 +448,12 @@ void AudioEngine::playbackDataCb(ma_device* pDevice, void* pOutput, const void* 
                         clip = self->presetAmbients_[cmd.soundId];
                     self->ambient_.configure(int(cmd.value), cmd.valueB, std::move(clip));
                 }
+                break;
+            case Command::Type::SetSoundboardMonitor:
+                self->soundboardMonitor_.store(cmd.value != 0.0f, std::memory_order_relaxed);
+                break;
+            case Command::Type::SetMonitorVoice:
+                self->monitorVoice_.store(cmd.value != 0.0f, std::memory_order_relaxed);
                 break;
             case Command::Type::SetSoundFx:
                 self->soundFxSend_.store(cmd.value != 0.0f, std::memory_order_relaxed);
@@ -607,6 +614,7 @@ void AudioEngine::playbackDataCb(ma_device* pDevice, void* pOutput, const void* 
     for (std::size_t i = 0; i < frames * kChannels; ++i) {
         if (std::isnan(out[i]) || std::isinf(out[i])) out[i] = 0.0f;
     }
+    std::memcpy(self->voiceBlock_, out, frames * kChannels * sizeof(float));
     const float duck = self->duckingStep(frames);
     std::memset(self->soundBlock_, 0, frames * kChannels * sizeof(float));
     self->mixer_.mix(self->soundBlock_, frames, kChannels, 1.0f);
@@ -659,14 +667,20 @@ void AudioEngine::playbackDataCb(ma_device* pDevice, void* pOutput, const void* 
         }
         const float wet = self->fxSendGain_;
         const float dry = 1.0f - wet;
-        for (std::size_t i = 0; i < frames * kChannels; ++i)
-            out[i] += (self->soundBlock_[i] * dry + self->fxDspBlock_[i] * wet) * duck;
+        for (std::size_t i = 0; i < frames * kChannels; ++i) {
+            self->soundboardBlock_[i] =
+                (self->soundBlock_[i] * dry + self->fxDspBlock_[i] * wet) * duck;
+            out[i] += self->soundboardBlock_[i];
+        }
     } else {
         if (!self->fxAiControls_.sleeping.load(std::memory_order_relaxed)) {
             self->fxAiControls_.sleeping.store(true, std::memory_order_relaxed);
             self->fxAiStage_.notifyWorker();
         }
-        for (std::size_t i = 0; i < frames * kChannels; ++i) out[i] += self->soundBlock_[i] * duck;
+        for (std::size_t i = 0; i < frames * kChannels; ++i) {
+            self->soundboardBlock_[i] = self->soundBlock_[i] * duck;
+            out[i] += self->soundboardBlock_[i];
+        }
     }
 
     // 4b. Preset ambience follows the existing mic VAD, never the soundboard.
@@ -678,11 +692,21 @@ void AudioEngine::playbackDataCb(ma_device* pDevice, void* pOutput, const void* 
                                       self->bypassEnabled() &&
                                       self->dspOn_.load(std::memory_order_relaxed);
         self->ambient_.process(self->ambientBlock_, frames, speechActive, ambientSystemOn);
-        for (std::size_t i = 0; i < frames * kChannels; ++i) out[i] += self->ambientBlock_[i];
+        for (std::size_t i = 0; i < frames * kChannels; ++i) {
+            out[i] += self->ambientBlock_[i];
+            self->voiceBlock_[i] += self->ambientBlock_[i];
+        }
     }
-    // Final guard after soundboard FX and custom ambience joins.
-    for (std::size_t i = 0; i < frames * kChannels; ++i)
+    // Final guard after soundboard FX and custom ambience joins. The monitor
+    // uses the isolated voice/soundboard sends, so sanitize those as well as
+    // the main cable mix.
+    for (std::size_t i = 0; i < frames * kChannels; ++i) {
         if (std::isnan(out[i]) || std::isinf(out[i])) out[i] = 0.0f;
+        if (std::isnan(self->voiceBlock_[i]) || std::isinf(self->voiceBlock_[i]))
+            self->voiceBlock_[i] = 0.0f;
+        if (std::isnan(self->soundboardBlock_[i]) || std::isinf(self->soundboardBlock_[i]))
+            self->soundboardBlock_[i] = 0.0f;
+    }
 
     // 5. Preview sounds (monitor/original output only, not the main cable).
     std::memset(self->previewBlock_, 0, frames * kChannels * sizeof(float));
@@ -696,9 +720,16 @@ void AudioEngine::playbackDataCb(ma_device* pDevice, void* pOutput, const void* 
                 frames * kChannels)
                 self->monOverflows_.fetch_add(1, std::memory_order_relaxed);
         } else {
-            // User-enabled self-monitoring: full mix + preview sounds.
-            for (std::size_t i = 0; i < frames * kChannels; ++i)
-                self->previewBlock_[i] += out[i];
+            // Independent monitor sends: voice preview and main soundboard can
+            // be enabled separately, while explicit previews are always added.
+            if (self->monitorVoice_.load(std::memory_order_relaxed)) {
+                for (std::size_t i = 0; i < frames * kChannels; ++i)
+                    self->previewBlock_[i] += self->voiceBlock_[i];
+            }
+            if (self->soundboardMonitor_.load(std::memory_order_relaxed)) {
+                for (std::size_t i = 0; i < frames * kChannels; ++i)
+                    self->previewBlock_[i] += self->soundboardBlock_[i];
+            }
             if (self->monitorRing_.write(self->previewBlock_, frames * kChannels) <
                 frames * kChannels)
                 self->monOverflows_.fetch_add(1, std::memory_order_relaxed);

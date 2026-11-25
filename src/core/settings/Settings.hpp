@@ -17,6 +17,8 @@ struct Settings {
     // VAD-gated preset ambiences and soundboard -> current voice/RVC routing.
     bool ambientEnabled = true;
     bool soundFxSend = false;
+    // Hear the main soundboard on the original output in addition to the cable.
+    bool soundboardMonitor = false;
     // UI language: "ru" (default) or "en".
     std::string language = "ru";
 

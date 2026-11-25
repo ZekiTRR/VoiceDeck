@@ -90,6 +90,7 @@ struct App {
     void setDsp(bool on);
     void setBypass(bool on);
     void setDucking(bool on);
+    bool setSoundboardMonitor(bool on, std::size_t playbackIdx = SIZE_MAX);
     void setPitchOverride(float semi, bool on);
     void setFormantOverride(float semi, bool on);
 
@@ -116,7 +117,7 @@ struct App {
     std::string setPresetEq(int idx, const float eq[8]);
     // Renames a sound clip (display name + the file in data\sounds).
     std::string renameSound(std::uint64_t id, const std::string& name);
-    std::string previewSound(std::uint64_t id);
+    std::string previewSound(std::uint64_t id, std::size_t playbackIdx = SIZE_MAX);
     void stopPreview();
     // Scans data\sounds, adds new audio files and drops library entries whose
     // backing file in that folder has been deleted. Returns {added, removed}.
@@ -135,6 +136,7 @@ struct App {
     // --- routing ---------------------------------------------------------------
     void selectDevices(size_t captureIdx, size_t playbackIdx);
     bool setMonitor(bool on, size_t playbackIdx = SIZE_MAX); // SIZE_MAX = default
+    bool setMonitorOutput(std::size_t playbackIdx);
 
     // --- state -----------------------------------------------------------------
     nlohmann::json statusJson() const;      // full snapshot for the UI
@@ -157,13 +159,20 @@ struct App {
     std::vector<VoicePreset> presets;
     bool bypassOn = true;
     bool duckingOn = false;
-    // True when previewSound() had to start the monitor itself; used to
-    // restore the pre-preview state when the preview voice is stopped.
-    bool monitorStartedForPreview_ = false;
     // Index of the preset currently carrying a temporary live override, or -1.
     int livePresetIndex_ = -1;
 
 private:
+    // Monitor lifetime is derived from these explicit desired states instead
+    // of which feature happened to open the device first.
+    bool voiceMonitorOn_ = false;
+    bool previewActive_ = false;
+    std::size_t resolveMonitorIdx(std::size_t playbackIdx) const;
+    bool ensureMonitor(std::size_t playbackIdx, bool restart);
+    void applyMonitorCommands();
+    void updateMonitorMode();
+    void reconcileMonitor();
+
     std::shared_ptr<const Sound> loadAmbientClip(const std::string& key, std::string& err);
     bool rebuildEngineAmbients();
     // Sound hotkey combos loaded from sounds.json (restored once the hotkey
