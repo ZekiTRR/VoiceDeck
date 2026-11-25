@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
-project(VoiceDeck VERSION 1.2.0 LANGUAGES C CXX)
+project(VoiceDeck VERSION 1.5.0 LANGUAGES C CXX)
 
-message(STATUS "VoiceDeck - Stage 1: Soundpad + VB-CABLE (Windows only)")
+message(STATUS "VoiceDeck - Soundpad + VoiceLab + RVC (Windows only)")
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 20)
