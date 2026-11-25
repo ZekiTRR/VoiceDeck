@@ -31,3 +31,6 @@ uierr.txt
 dec_test.obj
 
 non-deployment-directory/*
+
+# Local release artwork
+Github_Card.jpg

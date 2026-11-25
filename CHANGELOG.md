@@ -1,3 +1,37 @@
+# VoiceDeck 1.7.0
+
+## Highlights
+
+- **RU/EN localization**: switch the interface language on the Devices tab; the choice is saved in `data\settings.json`.
+- **Expanded VoiceLab**: 18 modules with per-module 8-band EQ. New effects include Tremolo, Flanger, Phaser, Wah Wah, Stutter, Stereo Width, Compressor and Octaver.
+- **Removable hotkeys**: clear any sound, preset, voice, AI or stop-all shortcut from the capture dialog or with Delete/Backspace. Removals are unregistered, persisted and reflected in tags and badges.
+- **Main soundboard monitoring**: the new “Hear sounds” toggle sends the same soundboard mix to your selected original output while keeping the virtual-cable send unchanged. Voice monitoring and preview-only playback remain independent.
+- **Faster preset workflow**: one-click character switching, draggable titlebar and an embedded VoiceDeck application icon. Built-in character edits stay temporary; “Save as New” persists them.
+
+## Compatibility
+
+- Existing `data\settings.json`, `characters.json`, sound libraries and RVC models continue to work.
+- The new language and soundboard-monitor settings default to Russian and off when absent.
+
+---
+
+# VoiceDeck 1.7.0 — Русский
+
+## Главное
+
+- **Локализация RU/EN**: переключение языка интерфейса на вкладке «Устройства»; выбор сохраняется в `data\settings.json`.
+- **Расширенный VoiceLab**: 18 модулей и собственный 8-полосный EQ у каждого модуля. Добавлены Tremolo, Flanger, Phaser, Wah Wah, Stutter, Stereo Width, Compressor и Octaver.
+- **Удаление хоткеев**: хоткей звука, персонажа, голоса, AI или остановки всех звуков можно снять кнопкой или Delete/Backspace. Регистрация снимается, изменение сохраняется, теги и badges обновляются.
+- **Мониторинг саундборда**: тумблер «Слышать звуки» выводит тот же основной микс на выбранный оригинальный выход, не меняя отправку в виртуальный кабель. Мониторинг голоса и preview-only режим остаются независимыми.
+- **Ускоренная работа с пресетами**: переключение персонажей одним кликом, перетаскивание окна за заголовок и встроенная иконка VoiceDeck. Изменения встроенных персонажей остаются временными; «Save as New» сохраняет их.
+
+## Совместимость
+
+- Существующие `data\settings.json`, `characters.json`, библиотеки звуков и RVC-модели продолжают работать.
+- Если новые настройки языка и мониторинга отсутствуют, используются русский язык и выключенный мониторинг.
+
+---
+
 # VoiceDeck 1.5.0
 
 ## Highlights

@@ -896,7 +896,7 @@ int main(int argc, char** argv) {
     }
 
     const bool cliMode = (argc > 1 && std::strcmp(argv[1], "--cli") == 0);
-    vd::log::info("VoiceDeck 1.5.0 - Soundpad + Voicemod (DSP + AI), C++20");
+    vd::log::info("VoiceDeck 1.7.0 - Soundpad + Voicemod (DSP + AI), C++20");
 
     // The engine owns several independent, fixed-size DSP chains. Keep the
     // facade off the default 1 MB thread stack (CLI and UI both enter here).
