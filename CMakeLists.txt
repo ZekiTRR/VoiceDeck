@@ -34,6 +34,7 @@ target_include_directories(iir1 PUBLIC third_party/iir1)
 
 add_executable(voicedeck
     src/app/main.cpp
+    src/app/voicedeck.rc
     src/app/App.cpp
     src/ui/UiApp.cpp
     src/core/engine/AudioEngine.cpp
@@ -92,6 +93,11 @@ add_custom_command(TARGET voicedeck POST_BUILD
         "${CMAKE_SOURCE_DIR}/third_party/onnxruntime/bin/onnxruntime.dll"
         "${CMAKE_SOURCE_DIR}/third_party/onnxruntime/bin/onnxruntime_providers_shared.dll"
         $<TARGET_FILE_DIR:voicedeck>)
+
+# Standalone icon for the portable package; the executable also embeds it.
+add_custom_command(TARGET voicedeck POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/assets/voicedeck.ico" "$<TARGET_FILE_DIR:voicedeck>/voicedeck.ico")
 
 # The web front-end lives in a "web" folder next to the exe.
 add_custom_command(TARGET voicedeck POST_BUILD

@@ -51,6 +51,7 @@ struct App {
     void setSoundLoop(std::uint64_t id, bool on);
     // Voice-activity gate threshold (-60..-20 dBFS); persists to settings.
     std::string setVadThresholdDb(float db);
+    void setLanguage(const std::string& language);
     // Global VAD-gated ambience master and soundboard FX Send.
     std::string setAmbientEnabled(bool on);
     std::string setSoundFxSend(bool on);
@@ -127,6 +128,9 @@ struct App {
     void liveUpdatePreset(int idx, const nlohmann::json& def);
     // Pushes a temporary copy into the audio engine without persisting it.
     void applyLivePreset(int idx, const VoicePreset& modified);
+    // Discard a temporary editor override and return the active character to
+    // its stored values (built-in presets stay factory-clean).
+    bool resetLivePreset();
 
     // --- routing ---------------------------------------------------------------
     void selectDevices(size_t captureIdx, size_t playbackIdx);

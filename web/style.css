@@ -41,7 +41,8 @@ html, body {
   justify-content: space-between;
   background: var(--bg0);
   border-bottom: 1px solid var(--line);
-  -webkit-app-region: no-drag;
+  /* The whole top strip is draggable, including empty space around buttons. */
+  -webkit-app-region: drag;
 }
 .tb-drag {
   display: flex;
@@ -61,8 +62,9 @@ html, body {
   background: var(--amber);
   display: inline-block;
 }
-.tb-btns { display: flex; height: 100%; }
+.tb-btns { display: flex; height: 100%; -webkit-app-region: no-drag; }
 .tb-btns button {
+  -webkit-app-region: no-drag;
   width: 42px;
   height: 100%;
   border: none;
@@ -516,6 +518,11 @@ h1, h2, h3 { text-wrap: balance; }
 .module-param-row:last-of-type { border-bottom: none; }
 .module-param-row input[type="range"] { width: 100%; }
 .module-param-row output { color: var(--text); font-size: 9.5px; text-align: right; }
+.module-eq-title { margin-top: 10px !important; color: var(--amber) !important; }
+.module-eq-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; }
+.module-eq-band { display: grid; grid-template-columns: 30px minmax(0, 1fr) 38px; align-items: center; gap: 5px; font-size: 9px; color: var(--dim); }
+.module-eq-band input[type="range"] { width: 100%; }
+.module-eq-band output { color: var(--text); font-size: 9px; text-align: right; }
 .fx-send { white-space: nowrap; }
 .fx-preset-name { max-width: 92px; overflow: hidden; text-overflow: ellipsis; color: var(--text); font-size: 10px; }
 .fx-send .switch { flex: none; }
@@ -675,6 +682,23 @@ input[type="range"].vslider::-webkit-slider-runnable-track {
 .s-ctl.preview:hover svg path:last-child { opacity: .5; }
 
 /* drag-drop visual feedback */
+html[lang="en"] body.dropzone-active::after {
+  content: "Drop files to add them to the library";
+  position: fixed;
+  inset: 0;
+  background: rgba(245, 166, 35, .12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--amber);
+  pointer-events: none;
+  z-index: 60;
+  border: 3px dashed var(--amber);
+  border-radius: 12px;
+  margin: 20px;
+}
 body.dropzone-active::after {
   content: "Отпусти файлы — добавим в библиотеку";
   position: fixed;

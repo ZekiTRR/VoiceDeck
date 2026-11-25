@@ -2,6 +2,8 @@
 "use strict";
 const host = (window.chrome && window.chrome.webview) || null;
 const $ = (id) => document.getElementById(id);
+vdSetLocale(vdLocale);
+vdWatchI18n();
 function send(obj) { if (host) host.postMessage(obj); }
 
 let toastTimer=null;
@@ -49,6 +51,8 @@ let S=null,tab="voice",hkTarget=null;
 const playingIds=new Set(),pausedIds=new Set(),previewIds=new Set();
 let soundView="grid",searchQuery="",settingsRenderedOnce=false,editingPreset=-1,editorDismissed=false;
 let editorChain=[],editorChainExplicit=false,editorChainDirty=false,editorModuleParams={},editingModuleId=null,chainDragIndex=-1,ambientTimer=null;
+let presetClickGuardUntil=0;
+let editorOriginalPreset=null;
 let activeTag=null;                 // selected tag filter chip
 let tagState=null;                  // {id, tags} for the tag dialog
 let editState=null;                 // audio editor working copy
@@ -71,6 +75,14 @@ const LAB_MODULES=[
   {id:"reverb",label:"Reverb",desc:"пространство",icon:"M4 17V8l4-3 4 3v9M14 17V5l3-2 3 2v12M4 20h16"},
   {id:"delay",label:"Delay",desc:"feedback echo",icon:"M4 8h10a4 4 0 0 1 0 8H9M4 8l3-3M4 8l3 3M9 16l-3 3M9 16l-3-3"},
   {id:"eq",label:"8-band EQ",desc:"8 полос эквалайзера",icon:"M4 18v-5m4 5V8m4 10V5m4 13V9m4 9v-6"},
+  {id:"tremolo",label:"Tremolo",desc:"амплитудное вибрато",icon:"M3 12h3l3-7 3 14 3-7h3"},
+  {id:"flanger",label:"Flanger",desc:"короткая модулированная задержка",icon:"M3 12c4-10 8 10 12 0M4 17c4-8 8 8 12 0"},
+  {id:"phaser",label:"Phaser",desc:"сканирующие all-pass фильтры",icon:"M3 12c2-8 4 8 6 0s4 8 6 0M3 18c2-6 4 6 6 0s4 6 6 0"},
+  {id:"wahwah",label:"Wah Wah",desc:" sweeper резонанса",icon:"M4 17l4-10 4 14 4-14 4 10"},
+  {id:"stutter",label:"Stutter",desc:"повтор фрагмента",icon:"M4 8h5v8H4ZM11 8h5v8h-5ZM18 8h3v8h-3"},
+  {id:"stereowidth",label:"Stereo Width",desc:"расширение стерео",icon:"M3 7l7 5-7 5M21 7l-7 5 7 5"},
+  {id:"compressor",label:"Compressor",desc:"компрессия динамики",icon:"M3 18h4l3-10 4 10 3-6 4 6"},
+  {id:"octaver",label:"Octaver",desc:"октава вниз",icon:"M4 8h5v4H4ZM11 12h4v4h-4ZM17 16h4v4h-4"},
 ];
 const LEGACY_CHAIN={
   room:["Room","реверберация"],hall:["Hall","реверберация"],cave:["Cave","пещера"],
@@ -117,9 +129,38 @@ const MODULE_PARAM_DEFS={
     {key:"value2",label:"Feedback",min:0,max:.9,step:.01,unit:"%",percent:true},
   ],
   eq:[],
+  tremolo:[
+    {key:"value",label:"Rate",min:.1,max:20,step:.1,unit:" Hz"},
+    {key:"value2",label:"Depth",min:0,max:1,step:.01,unit:"%",percent:true},
+  ],
+  flanger:[
+    {key:"value",label:"Rate",min:.05,max:5,step:.01,unit:" Hz"},
+    {key:"value2",label:"Depth",min:.5,max:15,step:.1,unit:" ms"},
+    {key:"value3",label:"Feedback",min:0,max:.8,step:.01,unit:"%",percent:true},
+  ],
+  phaser:[
+    {key:"value",label:"Rate",min:.1,max:10,step:.1,unit:" Hz"},
+    {key:"value2",label:"Depth",min:0,max:1,step:.01,unit:"%",percent:true},
+  ],
+  wahwah:[
+    {key:"value",label:"Rate",min:.1,max:10,step:.1,unit:" Hz"},
+    {key:"value2",label:"Центр",min:200,max:3000,step:10,unit:" Hz"},
+    {key:"value3",label:"Диапазон",min:0,max:2,step:.05,unit:" oct"},
+  ],
+  stutter:[
+    {key:"value",label:"Фрагмент",min:40,max:500,step:10,unit:" ms"},
+    {key:"value2",label:"Повторы",min:1,max:8,step:1,unit:"x"},
+  ],
+  stereowidth:[{key:"value",label:"Width",min:0,max:3,step:.05,unit:"x"}],
+  compressor:[
+    {key:"value",label:"Threshold",min:-40,max:0,step:1,unit:" dB"},
+    {key:"value2",label:"Ratio",min:1,max:12,step:.1,unit:":1"},
+    {key:"value3",label:"Makeup",min:0,max:12,step:.1,unit:" dB"},
+  ],
+  octaver:[{key:"value",label:"Mix",min:0,max:1,step:.01,unit:"%",percent:true}],
 };
 function defaultModuleParams(id){
-  const p={mix:1,value:0,value2:0,value3:0};
+  const p={mix:1,value:0,value2:0,value3:0,eq:Array(8).fill(0)};
   if(id==="formant")p.value2=150;
   else if(id==="vocoder"){p.value=100;p.value2=5;p.value3=80;}
   else if(id==="bitcrusher"){p.value=6;p.value2=.55;}
@@ -128,6 +169,14 @@ function defaultModuleParams(id){
   else if(id==="chorus"){p.value=.33;p.value2=3.5;p.value3=18;}
   else if(id==="reverb"){p.value=1.8;p.value2=.55;p.value3=.5;}
   else if(id==="delay"){p.value=280;p.value2=.34;}
+  else if(id==="tremolo"){p.value=4;p.value2=.5;}
+  else if(id==="flanger"){p.value=.5;p.value2=4;p.value3=.35;}
+  else if(id==="phaser"){p.value=.5;p.value2=.8;}
+  else if(id==="wahwah"){p.value=2;p.value2=800;p.value3=1;}
+  else if(id==="stutter"){p.value=180;p.value2=2;}
+  else if(id==="stereowidth")p.value=1.5;
+  else if(id==="compressor"){p.value=-18;p.value2=4;}
+  else if(id==="octaver")p.value=.5;
   return p;
 }
 function normaliseModuleParams(source,chain,preset){
@@ -138,9 +187,16 @@ function normaliseModuleParams(source,chain,preset){
     const d=defaultModuleParams(id),had=Object.prototype.hasOwnProperty.call(src,id);
     const raw=had&&src[id]&&typeof src[id]==="object"?src[id]:{};
     const num=(key,fallback)=>raw[key]!=null&&Number.isFinite(+raw[key])?+raw[key]:fallback;
+    const rawEq=Array.isArray(raw.eq)?raw.eq:null;
+    const fallbackEq=(id==="eq"&&!rawEq&&preset&&Array.isArray(preset.eq))?preset.eq:null;
     out[id]={
       mix:Math.max(0,Math.min(1,num("mix",d.mix))),
       value:num("value",d.value),value2:num("value2",d.value2),value3:num("value3",d.value3),
+      eq:Array.from({length:8},(_,b)=>{
+        const source=rawEq||fallbackEq||d.eq;
+        const v=Number.isFinite(+source[b])?+source[b]:d.eq[b];
+        return Math.max(-12,Math.min(12,v));
+      }),
     };
     if(id==="pitch"){
       if(!Object.prototype.hasOwnProperty.call(raw,"value"))out[id].value=+preset.transpose||0;
@@ -161,7 +217,7 @@ function chainInfo(id){
 }
 function chainForEditor(p){
   const raw=Array.isArray(p.chain)?p.chain.filter(id=>id&&id!=="none"):[];
-  if(p.chainExplicit||raw.some(isLabModule))return raw.slice(0,16);
+  if(p.chainExplicit||raw.some(isLabModule))return raw.slice(0,24);
   const out=[];
   if((p.eq||[]).some(v=>Math.abs(+v||0)>0.001))out.push("eq");
   if(+p.transpose||+p.lfoDepth)out.push("pitch");
@@ -171,7 +227,7 @@ function chainForEditor(p){
     if(p.space&&p.space!=="none")out.push(p.space);
     if(p.effect&&p.effect!=="none")out.push(p.effect);
   }
-  return out.slice(0,16);
+  return out.slice(0,24);
 }
 
 // ---- Custom vertical fader -------------------------------------------------
@@ -253,7 +309,7 @@ function demoState(){
       custom:i===5,hotkey:i===5?"Ctrl+Alt+F1":"",eq:[0,0,0,0,0,0,0,0],chain:[],
       ambient:i===10?"radio":i===13?"cave":"none",ambientGain:i===10?0.2:0.18}));
   const pk=[];for(let i=0;i<256;i++)pk.push(0.3+0.6*Math.abs(Math.sin(i*0.08)*Math.cos(i*0.03)));
-  return {type:"state",dspOn:true,bypassOn:true,duckingOn:false,ambientOn:true,soundFxSend:false,monitorOn:false,preset:2,presets:P,
+  return {type:"state",language:vdLocale,dspOn:true,bypassOn:true,duckingOn:false,ambientOn:true,soundFxSend:false,monitorOn:false,preset:2,presets:P,
     sounds:[{id:1,name:"airhorn",dur:2.1,gain:1,loop:false,hotkey:"Ctrl+Alt+1",eq:[0,0,0,0,0],peaks:pk,
       rawPeaks:pk,sourceDur:2.1,tags:["hotkey","сигнал"],edits:{trimStart:0,trimEnd:0,gain:1,regions:[]}},
       {id:2,name:"bell",dur:1.2,gain:0.8,loop:false,hotkey:"",eq:[0,0,0,0,0],peaks:pk,
@@ -287,6 +343,7 @@ function renderState(){
   setSwitch($("powerBtn"),S.dspOn&&S.bypassOn);setSwitch($("aiPowerBtn"),S.ai.enabled);
   setSwitch($("ambientPowerBtn"),S.ambientOn);setSwitch($("fxSendBtn"),S.soundFxSend);
   $("fxPresetLabel").textContent=S.presets[S.preset]?S.presets[S.preset].name:"";
+  $("uiLanguage").value=S.language||vdLocale;
   setSwitch($("monitorBtn"),S.devices.curMonitor>=0);
   renderPresets();renderTagFilter();renderSounds();renderAi();
   if(!settingsRenderedOnce){renderSettings();settingsRenderedOnce=true;}
@@ -331,6 +388,8 @@ function renderPresets(){
     // Click = apply + open editor
     tile.addEventListener("click",(e)=>{
       if(e.target.classList.contains("keycap")){startHkCapture({target:"preset",idx:p.idx,combo:p.hotkey});return;}
+      presetClickGuardUntil=performance.now()+250;
+      if(editingPreset>=0&&editingPreset!==p.idx)restoreEditorPreset(false);
       send({cmd:"preset",idx:p.idx});S.preset=p.idx;renderPresets();
       $("fxPresetLabel").textContent=p.name;
       openPresetEditor(p.idx); // auto-open editor with this preset
@@ -391,6 +450,7 @@ function setAmbientEditor(p){
 function openPresetEditor(idx){
   if(idx<0||idx>=S.presets.length)return;
   editingPreset=idx;editorDismissed=false;
+  editorOriginalPreset=JSON.parse(JSON.stringify(S.presets[idx]));
   const p=S.presets[idx];
   $("presetEditor").classList.remove("hidden");
   $("peName").value=p.name;
@@ -410,9 +470,16 @@ function openPresetEditor(idx){
   setAmbientEditor(p);
   setEqFaders(editorFaders,p.eq);
 }
+function restoreEditorPreset(notifyHost){
+  if(editingPreset<0||!editorOriginalPreset)return;
+  S.presets[editingPreset]=JSON.parse(JSON.stringify(editorOriginalPreset));
+  if(notifyHost)send({cmd:"resetPreset",idx:editingPreset});
+  renderPresets();
+}
 function closePresetEditor(){
+  restoreEditorPreset(true);
   $("presetEditor").classList.add("hidden");
-  editingPreset=-1;editorDismissed=true;editorChain=[];editorChainExplicit=false;editorChainDirty=false;editorModuleParams={};editingModuleId=null;chainDragIndex=-1;
+  editingPreset=-1;editorDismissed=true;editorChain=[];editorChainExplicit=false;editorChainDirty=false;editorModuleParams={};editingModuleId=null;chainDragIndex=-1;editorOriginalPreset=null;
 }
 
 function sendLiveUpdate(){
@@ -539,14 +606,39 @@ function renderModuleParams(){
     });
     row.appendChild(name);row.appendChild(input);row.appendChild(out);body.appendChild(row);
   }
-  if(editingModuleId==="eq"){
-    const note=document.createElement("div");note.className="note";
-    note.textContent="Полосы EQ настраиваются в секции «Эквалайзер» ниже. Mix меняет общую силу этого блока.";
-    body.appendChild(note);
+  const eqTitle=document.createElement("div");eqTitle.className="panel-title module-eq-title";
+  eqTitle.textContent="EQ этого модуля";body.appendChild(eqTitle);
+  const eqGrid=document.createElement("div");eqGrid.className="module-eq-grid";
+  const params=editorModuleParams[editingModuleId];
+  for(let b=0;b<8;b++){
+    const band=document.createElement("label");band.className="module-eq-band";
+    const freq=document.createElement("span");freq.className="mono";
+    freq.textContent=EQ_FREQS[b]>=1000?(EQ_FREQS[b]/1000)+"k":String(EQ_FREQS[b]);
+    const input=document.createElement("input");input.type="range";input.min=-12;input.max=12;input.step=.5;
+    input.value=params.eq[b];input.setAttribute("aria-label",`EQ ${freq.textContent} Hz`);
+    const out=document.createElement("output");out.className="mono";
+    out.textContent=(params.eq[b]>0?"+":"")+Number(params.eq[b]).toFixed(1);
+    input.setAttribute("aria-valuetext",out.textContent);
+    input.addEventListener("input",()=>{
+      const v=Math.max(-12,Math.min(12,+input.value));
+      editorModuleParams[editingModuleId].eq[b]=v;
+      out.textContent=(v>0?"+":"")+v.toFixed(1);
+      input.setAttribute("aria-valuetext",out.textContent);
+      if(editingPreset>=0)S.presets[editingPreset].moduleParams=JSON.parse(JSON.stringify(editorModuleParams));
+      editorChainDirty=true;sendLiveUpdate();
+    });
+    band.appendChild(freq);band.appendChild(input);band.appendChild(out);eqGrid.appendChild(band);
   }
+  body.appendChild(eqGrid);
 }
 function renderModuleControls(){
   document.querySelectorAll("#presetEditor [data-module]").forEach(row=>{
+    if(row.dataset.module==="eq"){
+      // Explicit VoiceLab chains use the EQ inside each selected module; the
+      // preset-level EQ only belongs to legacy automatic processing.
+      row.classList.toggle("hidden",editorChainExplicit);
+      return;
+    }
     const on=editorChain.includes(row.dataset.module);
     row.classList.toggle("disabled",!on);
     row.title=on?"":`Добавь блок ${chainInfo(row.dataset.module).label} в VoiceLab`;
@@ -562,7 +654,7 @@ function renderModulePalette(){
     b.setAttribute("aria-label",b.title);
     b.innerHTML=SVGP(m.icon)+`<span>${esc(m.label)}</span>`+(used?'<span class="module-state">✓</span>':'');
     b.addEventListener("click",()=>{
-      if(editorChain.length>=16){toast("Максимум 16 модулей");return;}
+      if(editorChain.length>=24){toast("Максимум 24 модуля");return;}
       editorChain.push(m.id);commitEditorChain();selectModule(m.id);
     });
     el.appendChild(b);
@@ -1123,7 +1215,7 @@ function renderMeters(m){
   if(m.e2eLatency!=null)S.e2eLatency=m.e2eLatency;
   if(m.voiceLatency!=null)S.voiceLatency=m.voiceLatency;
   if(m.dspOn!=null)S.dspOn=m.dspOn;
-  if(m.preset!=null&&S.preset!==m.preset){
+  if(m.preset!=null&&S.preset!==m.preset&&performance.now()>=presetClickGuardUntil){
     S.preset=m.preset;renderPresets();
     $("fxPresetLabel").textContent=S.presets[m.preset]?S.presets[m.preset].name:"";
     if(editingPreset>=0)openPresetEditor(m.preset);
@@ -1246,6 +1338,10 @@ $("aiAutolimit").addEventListener("change",e=>send({cmd:"aiAutolimit",on:e.targe
 $("aiFlap").addEventListener("change",()=>send({cmd:"aiAutolimit",on:$("aiAutolimit").checked,n:+$("aiFlap").value}));
 
 // Settings
+$("uiLanguage").addEventListener("change",e=>{
+  const lang=e.target.value==="en"?"en":"ru";
+  vdSetLocale(lang);if(S)S.language=lang;send({cmd:"setLanguage",language:lang});
+});
 $("latencyMode").addEventListener("change",e=>{send({cmd:"setLatencyMode",mode:+e.target.value});
   toast("Задержка изменена");settingsRenderedOnce=false;});
 $("origSelect").addEventListener("change",e=>{if($("monitorChk").checked&&settingsRenderedOnce)send({cmd:"monitor",on:true,idx:+e.target.value});});
@@ -1370,8 +1466,8 @@ document.addEventListener("drop",e=>{
 $("tbMin").addEventListener("click",()=>send({cmd:"winMin"}));
 $("tbMax").addEventListener("click",()=>send({cmd:"winMax"}));
 $("tbClose").addEventListener("click",()=>send({cmd:"exit"}));
-$("tbDrag").addEventListener("mousedown",()=>send({cmd:"winDrag"}));
-$("tbDrag").addEventListener("dblclick",()=>send({cmd:"winMax"}));
+// Native WebView2 draggable regions handle dragging and double-click maximize
+// over the whole titlebar; no JS drag/maximize command is needed.
 
 // Init
 buildLed();initVoiceEq();
@@ -1390,6 +1486,7 @@ if(host){
       const first=!S;
       const oldIds=new Set((S&&S.sounds||[]).map(s=>s.id));
       const newIds=new Set((m.sounds||[]).map(s=>s.id));
+      if(m.language)vdSetLocale(m.language);
       S=m;renderState();loadVoiceEq();
       if(editingPreset>=0&&S.presets[editingPreset])setAmbientEditor(S.presets[editingPreset]);
       if(!first){

@@ -17,6 +17,8 @@ struct Settings {
     // VAD-gated preset ambiences and soundboard -> current voice/RVC routing.
     bool ambientEnabled = true;
     bool soundFxSend = false;
+    // UI language: "ru" (default) or "en".
+    std::string language = "ru";
 
     // AI voice tuning (detailed settings, persisted).
     std::string aiProvider = "auto"; // auto | cuda | dml | cpu

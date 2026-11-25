@@ -35,6 +35,8 @@ bool Settings::load(const std::filesystem::path& file) {
         ducking = j.value("ducking", false);
         ambientEnabled = j.value("ambientEnabled", true);
         soundFxSend = j.value("soundFxSend", false);
+        language = j.value("language", "ru");
+        if (language != "ru" && language != "en") language = "ru";
         aiProvider = j.value("aiProvider", "auto");
         aiPrimeMarginMs = j.value("aiPrimeMarginMs", 20);
         aiFadeMs = j.value("aiFadeMs", 30);
@@ -61,6 +63,7 @@ bool Settings::save(const std::filesystem::path& file) const {
     j["ducking"] = ducking;
     j["ambientEnabled"] = ambientEnabled;
     j["soundFxSend"] = soundFxSend;
+    j["language"] = language;
     j["aiProvider"] = aiProvider;
     j["aiPrimeMarginMs"] = aiPrimeMarginMs;
     j["aiFadeMs"] = aiFadeMs;

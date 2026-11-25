@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="128" y1="64" x2="900" y2="960" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1d1d24"/>
+      <stop offset="1" stop-color="#0e0e12"/>
+    </linearGradient>
+    <linearGradient id="amber" x1="360" y1="190" x2="680" y2="830" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffc25c"/>
+      <stop offset="1" stop-color="#e99a18"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Graphite app tile -->
+  <rect x="32" y="32" width="960" height="960" rx="224" fill="url(#bg)" stroke="#34343e" stroke-width="8"/>
+
+  <!-- Three patch-bay faders behind the microphone -->
+  <g stroke="#3b3b46" stroke-width="26" stroke-linecap="round">
+    <path d="M258 254V770"/>
+    <path d="M512 236V748"/>
+    <path d="M766 254V770"/>
+  </g>
+  <g fill="url(#amber)">
+    <rect x="224" y="482" width="68" height="116" rx="22"/>
+    <rect x="478" y="682" width="68" height="116" rx="22"/>
+    <rect x="732" y="326" width="68" height="116" rx="22"/>
+  </g>
+  <g fill="#16161c" opacity=".9">
+    <rect x="238" y="508" width="40" height="8" rx="4"/>
+    <rect x="492" y="708" width="40" height="8" rx="4"/>
+    <rect x="746" y="352" width="40" height="8" rx="4"/>
+  </g>
+
+  <!-- Microphone capsule -->
+  <rect x="402" y="174" width="220" height="352" rx="110" fill="#141419" stroke="url(#amber)" stroke-width="38"/>
+  <g stroke="#f5a623" stroke-width="22" stroke-linecap="round">
+    <path d="M452 276H572"/>
+    <path d="M452 350H572"/>
+    <path d="M452 424H572"/>
+  </g>
+
+  <!-- Yoke, stem and base -->
+  <path d="M326 500V574C326 674 404 724 512 724C620 724 698 674 698 574V500"
+        fill="none" stroke="url(#amber)" stroke-width="40" stroke-linecap="round"/>
+  <rect x="490" y="704" width="44" height="116" rx="22" fill="url(#amber)"/>
+  <rect x="382" y="798" width="260" height="48" rx="24" fill="url(#amber)"/>
+</svg>

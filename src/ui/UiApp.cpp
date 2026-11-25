@@ -1,12 +1,14 @@
 #include "ui/UiApp.hpp"
 
 #include "app/App.hpp"
+#include "app/resource.h"
 #include "core/util/Log.hpp"
 
 #include <windows.h>
 #include <windowsx.h>
 #include <wrl.h>
 #include "WebView2.h"
+#include "WebView2EnvironmentOptions.h"
 #include <shobjidl.h>
 #include <shellapi.h>
 
@@ -113,6 +115,9 @@ private:
 
     void postJson(const nlohmann::json& j); // any thread
     void notify(const std::string& text);   // toast in the web UI
+    const wchar_t* uiText(const wchar_t* ru, const wchar_t* en) const {
+        return app_.settings.language == "en" ? en : ru;
+    }
     void drainPending();                     // UI thread
     void pushState();
     void pushMeters();
@@ -263,6 +268,12 @@ void UiApp::createWindow() {
     wc.lpfnWndProc = &UiApp::wndProcStatic;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.hCursor = LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
+    const auto loadAppIcon = [&](int width, int height) {
+        return reinterpret_cast<HICON>(LoadImageW(wc.hInstance, MAKEINTRESOURCEW(IDI_VOICEDECK),
+                                                   IMAGE_ICON, width, height, LR_SHARED));
+    };
+    wc.hIcon = loadAppIcon(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+    wc.hIconSm = loadAppIcon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
     wc.hbrBackground = CreateSolidBrush(RGB(0x0b, 0x0b, 0x0d));
     wc.lpszClassName = kWindowClass;
     RegisterClassExW(&wc);
@@ -280,6 +291,12 @@ void UiApp::createWindow() {
     hwnd_ = CreateWindowExW(0, kWindowClass, L"VoiceDeck",
                             WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX, x, y, w,
                             h, nullptr, nullptr, wc.hInstance, this);
+    // Explicit window icons keep Alt-Tab and the taskbar correct even for the
+    // frameless window and when Windows does not reuse the class icon.
+    const HICON appIcon = loadAppIcon(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+    const HICON appIconSm = loadAppIcon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
+    SendMessageW(hwnd_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(appIcon));
+    SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(appIconSm));
     ShowWindow(hwnd_, SW_SHOW);
     UpdateWindow(hwnd_);
     DragAcceptFiles(hwnd_, TRUE);
@@ -288,8 +305,13 @@ void UiApp::createWindow() {
 void UiApp::createWebView() {
     // User data stays in the portable data folder.
     const std::wstring userData = (app_.dataDir / L"webview2").wstring();
+    // Enable draggable regions in the WebView2 runtime so CSS
+    // -webkit-app-region: drag can move the frameless window.
+    auto options = Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();
+    options->put_AdditionalBrowserArguments(
+        L"--enable-features=msWebView2EnableDraggableRegions=true");
     HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(
-        nullptr, userData.c_str(), nullptr,
+        nullptr, userData.c_str(), options.Get(),
         new EnvCreatedHandler(this));
     if (FAILED(hr)) {
         log::error("WebView2 init failed (0x%08lX) - is the WebView2 Runtime installed?", hr);
@@ -349,6 +371,13 @@ void UiApp::onControllerCreated(HRESULT hr, ICoreWebView2Controller* controller)
         settings->put_AreDefaultContextMenusEnabled(FALSE);
         settings->put_IsZoomControlEnabled(FALSE);
         settings->put_IsStatusBarEnabled(FALSE);
+        ICoreWebView2Settings9* settings9 = nullptr;
+        if (SUCCEEDED(settings->QueryInterface(IID_PPV_ARGS(&settings9))) && settings9) {
+            const HRESULT regionHr = settings9->put_IsNonClientRegionSupportEnabled(TRUE);
+            if (FAILED(regionHr))
+                log::warn("WebView2 non-client regions unavailable (0x%08lX)", regionHr);
+            settings9->Release();
+        }
         settings->Release();
     }
 
@@ -541,12 +570,12 @@ void UiApp::openAddSoundDialog() {
     }
     {
         COMDLG_FILTERSPEC filters[] = {
-            {L"Audio (WAV, MP3, FLAC)", L"*.wav;*.mp3;*.flac"},
-            {L"All files", L"*.*"},
+            {uiText(L"Аудио (WAV, MP3, FLAC)", L"Audio (WAV, MP3, FLAC)"), L"*.wav;*.mp3;*.flac"},
+            {uiText(L"Все файлы", L"All files"), L"*.*"},
         };
         dlg->SetFileTypes(2, filters);
         dlg->SetOptions(FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
-        dlg->SetTitle(L"Add sounds to VoiceDeck");
+        dlg->SetTitle(uiText(L"Добавить звуки в VoiceDeck", L"Add sounds to VoiceDeck"));
     }
     if (SUCCEEDED(dlg->Show(hwnd_))) {
         IShellItemArray* items = nullptr;
@@ -587,12 +616,14 @@ void UiApp::openAmbientDialog(int presetIdx) {
     }
     {
         COMDLG_FILTERSPEC filters[] = {
-            {L"Audio (WAV, MP3, FLAC, OGG)", L"*.wav;*.mp3;*.flac;*.ogg;*.opus;*.m4a"},
-            {L"All files", L"*.*"},
+            {uiText(L"Аудио (WAV, MP3, FLAC, OGG)", L"Audio (WAV, MP3, FLAC, OGG)"),
+             L"*.wav;*.mp3;*.flac;*.ogg;*.opus;*.m4a"},
+            {uiText(L"Все файлы", L"All files"), L"*.*"},
         };
         dlg->SetFileTypes(2, filters);
         dlg->SetOptions(FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_FILEMUSTEXIST);
-        dlg->SetTitle(L"Выберите фоновый эмбиент для персонажа");
+        dlg->SetTitle(uiText(L"Выберите фоновый эмбиент для персонажа",
+                             L"Choose a background ambience"));
     }
     if (SUCCEEDED(dlg->Show(hwnd_))) {
         IShellItem* item = nullptr;
@@ -618,10 +649,13 @@ void UiApp::openPthDialog() {
         notify("Не удалось открыть диалог выбора модели");
         return;
     }
-    COMDLG_FILTERSPEC filters[] = {{L"RVC voice (*.pth)", L"*.pth"}, {L"All files", L"*.*"}};
+    COMDLG_FILTERSPEC filters[] = {
+        {uiText(L"Голос RVC (*.pth)", L"RVC voice (*.pth)"), L"*.pth"},
+        {uiText(L"Все файлы", L"All files"), L"*.*"}};
     dlg->SetFileTypes(2, filters);
     dlg->SetOptions(FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_FILEMUSTEXIST);
-    dlg->SetTitle(L"Выберите RVC v2 модель (.pth)");
+    dlg->SetTitle(uiText(L"Выберите RVC v2 модель (.pth)",
+                         L"Select an RVC v2 model (.pth)"));
     if (SUCCEEDED(dlg->Show(hwnd_))) {
         IShellItem* item = nullptr;
         if (SUCCEEDED(dlg->GetResult(&item)) && item) {
@@ -814,7 +848,13 @@ void UiApp::handleMessage(const std::string& jsonText) {
 
     // --- voice characters ---------------------------------------------------
     if (cmd == "preset") {
-        if (j.contains("idx")) app_.applyPreset(j.at("idx").get<int>());
+        if (j.contains("idx")) {
+            app_.applyPreset(j.at("idx").get<int>());
+            // Publish the target index only after the audio callback has
+            // consumed SetPreset; otherwise the first click can be overwritten
+            // by a stale meter frame carrying the previous active preset.
+            app_.engine.drainCommands();
+        }
         pushMeters();
         return;
     }
@@ -831,6 +871,11 @@ void UiApp::handleMessage(const std::string& jsonText) {
     if (cmd == "duckingOn") {
         app_.setDucking(j.value("on", true));
         pushMeters();
+        return;
+    }
+    if (cmd == "setLanguage") {
+        app_.setLanguage(j.value("language", "ru"));
+        pushState();
         return;
     }
     if (cmd == "ambientOn") {
@@ -891,6 +936,13 @@ void UiApp::handleMessage(const std::string& jsonText) {
         app_.liveUpdatePreset(idx, j);
         // No pushState: re-render would reset the editor sliders.
         pushMeters();
+        return;
+    }
+    if (cmd == "resetPreset") {
+        if (app_.resetLivePreset())
+            pushState();
+        else
+            notify("Аудиодвижок занят — повтори выход из редактора");
         return;
     }
     if (cmd == "addPreset") {
@@ -1115,12 +1167,14 @@ void UiApp::handleMessage(const std::string& jsonText) {
         }
         {
             COMDLG_FILTERSPEC filters[] = {
-                {L"AI voice (ONNX + JSON рядом)", L"*.onnx"},
-                {L"All files", L"*.*"},
+                {uiText(L"AI-голос (ONNX + JSON рядом)", L"AI voice (ONNX + matching JSON)"),
+                 L"*.onnx"},
+                {uiText(L"Все файлы", L"All files"), L"*.*"},
             };
             dlg->SetFileTypes(2, filters);
             dlg->SetOptions(FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_FILEMUSTEXIST);
-            dlg->SetTitle(L"Импорт AI-голоса (нужен .onnx и его .json)");
+            dlg->SetTitle(uiText(L"Импорт AI-голоса (нужен .onnx и его .json)",
+                                 L"Import AI voice (.onnx with matching .json)"));
         }
         if (SUCCEEDED(dlg->Show(hwnd_))) {
             IShellItem* item = nullptr;

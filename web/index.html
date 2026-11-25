@@ -118,7 +118,7 @@
               </div>
             </div>
             <div class="eq-section module-control" data-module="eq">
-              <span class="panel-title">Эквалайзер</span>
+              <span class="panel-title">Эквалайзер пресета (legacy)</span>
               <div class="eq-sliders" id="peEq"></div>
             </div>
             <div class="form-actions">
@@ -190,6 +190,12 @@
       <!-- SETTINGS -->
       <section id="tab-settings" class="pane">
         <div class="settings-grid">
+          <div class="panel">
+            <h3 class="panel-title">Интерфейс</h3>
+            <div class="row"><span>Язык</span>
+              <select id="uiLanguage"><option value="ru">Русский</option><option value="en">English</option></select></div>
+            <div class="note">Язык интерфейса сохраняется в <span class="mono">data\settings.json</span>.</div>
+          </div>
           <div class="panel">
             <h3 class="panel-title">Маршрут</h3>
             <div class="row"><span>Микрофон</span><select id="capSelect"></select></div>
@@ -334,6 +340,7 @@
 
 <div id="toast" class="hidden"></div>
 
+<script src="i18n.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

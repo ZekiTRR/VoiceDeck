@@ -22,6 +22,10 @@ struct VoiceLabParams {
     float value = 0.0f;
     float value2 = 0.0f;
     float value3 = 0.0f;
+    // Every VoiceLab module has its own 8-band EQ, applied at that module's
+    // position in the chain (dB, same center frequencies as the character EQ).
+    float eq[8] = {};
+    bool eqProvided = false; // migration: old EQ modules had only preset-level eq
 };
 
 // A voice "character" - the full parameter set of the DSP chain.
@@ -70,7 +74,10 @@ struct VoicePreset {
 inline bool isVoiceLabModule(std::string_view name) {
     return name == "pitch" || name == "formant" || name == "vocoder" ||
            name == "bitcrusher" || name == "ringmod" || name == "distortion" ||
-           name == "chorus" || name == "reverb" || name == "delay" || name == "eq";
+           name == "chorus" || name == "reverb" || name == "delay" || name == "eq" ||
+           name == "tremolo" || name == "flanger" || name == "phaser" || name == "wahwah" ||
+           name == "stutter" || name == "stereowidth" || name == "compressor" ||
+           name == "octaver";
 }
 
 inline VoiceLabParams defaultVoiceLabParams(std::string_view name) {
@@ -83,6 +90,14 @@ inline VoiceLabParams defaultVoiceLabParams(std::string_view name) {
     else if (name == "chorus") { p.value = 0.33f; p.value2 = 3.5f; p.value3 = 18.0f; }
     else if (name == "reverb") { p.value = 1.8f; p.value2 = 0.55f; p.value3 = 0.5f; }
     else if (name == "delay") { p.value = 280.0f; p.value2 = 0.34f; }
+    else if (name == "tremolo") { p.value = 4.0f; p.value2 = 0.5f; }
+    else if (name == "flanger") { p.value = 0.5f; p.value2 = 4.0f; p.value3 = 0.35f; }
+    else if (name == "phaser") { p.value = 0.5f; p.value2 = 0.8f; }
+    else if (name == "wahwah") { p.value = 2.0f; p.value2 = 800.0f; p.value3 = 1.0f; }
+    else if (name == "stutter") { p.value = 180.0f; p.value2 = 2.0f; }
+    else if (name == "stereowidth") p.value = 1.5f;
+    else if (name == "compressor") { p.value = -18.0f; p.value2 = 4.0f; }
+    else if (name == "octaver") p.value = 0.5f;
     return p;
 }
 
@@ -98,6 +113,14 @@ inline VoiceLabParams readVoiceLabParams(const nlohmann::json& j, std::string_vi
     finite("value", p.value);
     finite("value2", p.value2);
     finite("value3", p.value3);
+    if (j.contains("eq") && j["eq"].is_array()) {
+        p.eqProvided = true;
+        for (std::size_t i = 0; i < 8 && i < j["eq"].size(); ++i) {
+            if (!j["eq"][i].is_number()) continue;
+            const double gain = j["eq"][i].get<double>();
+            if (std::isfinite(gain)) p.eq[i] = float(std::clamp(gain, -12.0, 12.0));
+        }
+    }
     p.mix = std::clamp(p.mix, 0.0f, 1.0f);
     if (name == "pitch") {
         p.value = std::clamp(p.value, -24.0f, 24.0f);
@@ -129,13 +152,40 @@ inline VoiceLabParams readVoiceLabParams(const nlohmann::json& j, std::string_vi
     } else if (name == "delay") {
         p.value = std::clamp(p.value, 20.0f, 800.0f);
         p.value2 = std::clamp(p.value2, 0.0f, 0.9f);
+    } else if (name == "tremolo") {
+        p.value = std::clamp(p.value, 0.1f, 20.0f);
+        p.value2 = std::clamp(p.value2, 0.0f, 1.0f);
+    } else if (name == "flanger") {
+        p.value = std::clamp(p.value, 0.05f, 5.0f);
+        p.value2 = std::clamp(p.value2, 0.5f, 15.0f);
+        p.value3 = std::clamp(p.value3, 0.0f, 0.8f);
+    } else if (name == "phaser") {
+        p.value = std::clamp(p.value, 0.1f, 10.0f);
+        p.value2 = std::clamp(p.value2, 0.0f, 1.0f);
+    } else if (name == "wahwah") {
+        p.value = std::clamp(p.value, 0.1f, 10.0f);
+        p.value2 = std::clamp(p.value2, 200.0f, 3000.0f);
+        p.value3 = std::clamp(p.value3, 0.0f, 2.0f);
+    } else if (name == "stutter") {
+        p.value = std::clamp(p.value, 40.0f, 500.0f);
+        p.value2 = std::clamp(std::round(p.value2), 1.0f, 8.0f);
+    } else if (name == "stereowidth") {
+        p.value = std::clamp(p.value, 0.0f, 3.0f);
+    } else if (name == "compressor") {
+        p.value = std::clamp(p.value, -40.0f, 0.0f);
+        p.value2 = std::clamp(p.value2, 1.0f, 12.0f);
+        p.value3 = std::clamp(p.value3, 0.0f, 12.0f);
+    } else if (name == "octaver") {
+        p.value = std::clamp(p.value, 0.0f, 1.0f);
     }
     return p;
 }
 
 inline nlohmann::json writeVoiceLabParams(const VoiceLabParams& p) {
+    nlohmann::json eq = nlohmann::json::array();
+    for (float gain : p.eq) eq.push_back(double(gain));
     return {{"mix", double(p.mix)}, {"value", double(p.value)},
-            {"value2", double(p.value2)}, {"value3", double(p.value3)}};
+            {"value2", double(p.value2)}, {"value3", double(p.value3)}, {"eq", std::move(eq)}};
 }
 
 inline bool isChainModule(std::string_view name) {
@@ -316,7 +366,7 @@ p.space = e.value("space", "none");
                 for (const auto& ce : e["chain"]) {
                     if (!ce.is_string()) continue;
                     std::string item = ce.get<std::string>();
-                    if (isChainModule(item) && p.chain.size() < 16) p.chain.push_back(std::move(item));
+                    if (isChainModule(item) && p.chain.size() < 24) p.chain.push_back(std::move(item));
                 }
             }
             p.chainExplicit = e.value("chainExplicit", false) || hasVoiceLabChain(p.chain);

@@ -22,6 +22,7 @@ namespace vd {
 
 enum class Space { None, Room, Hall, Cave, Helmet, Radio, Megaphone };
 enum class Effect { None, Robot, Alien, Atari, Clone, Silence };
+// Existing numeric values (None..Eq) are kept stable; new modules are appended.
 enum class LabModule {
     None,
     Pitch,
@@ -33,8 +34,18 @@ enum class LabModule {
     Chorus,
     Reverb,
     Delay,
-    Eq
+    Eq,
+    Tremolo,
+    Flanger,
+    Phaser,
+    Wahwah,
+    Stutter,
+    Stereowidth,
+    Compressor,
+    Octaver
 };
+
+constexpr std::size_t kLabModuleCount = 19;
 
 // One element in the effect chain.
 struct ChainItem {
@@ -110,11 +121,16 @@ private:
                        float* dstL, float* dstR, std::size_t frames,
                        float transpose, float formant);
     void resetClone();
+    void resetOctaver();
+    void resetStutter();
 
     double sr_ = 48000.0;
     PresetParams params_{};
-    // Fixed, scalar-only snapshot indexed by LabModule (None=0 .. Eq=10).
-    std::array<VoiceLabParams, 11> labParams_{};
+    // Fixed, scalar-only snapshot indexed by LabModule (None=0 .. Octaver=18).
+    std::array<VoiceLabParams, kLabModuleCount> labParams_{};
+    // Whether a preset supplied an explicit entry for each module. The
+    // standalone Eq module falls back to the legacy preset EQ without one.
+    std::array<bool, kLabModuleCount> labParamsPresent_{};
     bool voiceLabChain_ = false;
     bool hasActiveChain_ = false;
     Space configuredSpace_ = Space::None;
@@ -138,7 +154,7 @@ private:
 
     // --- character (pitch/formant, Signalsmith Stretch)
     signalsmith::stretch::SignalsmithStretch<float> stretch_;
-    static constexpr std::size_t kMaxChainItems = 16;
+    static constexpr std::size_t kMaxChainItems = 24;
     std::array<ChainItem, kMaxChainItems> chain_{}; // ordered effect chain
     std::size_t chainSize_ = 0;
 
@@ -170,8 +186,48 @@ private:
     daisysp::DelayLine<float, kChorusDelayCapacity> chorusDelay_[2];
     float chorusPhase_ = 0.0f;
 
-    PeakingBand eq_[8][2];
+    // Every module has its own independent 8-band EQ, applied to its input
+    // before the effect (the standalone Eq module *is* that EQ).
+    static constexpr std::size_t kModuleEqBands = 8;
+    PeakingBand moduleEq_[kLabModuleCount][kModuleEqBands][2];
+    std::array<std::array<bool, kModuleEqBands>, kLabModuleCount> moduleEqActive_{};
+    std::array<bool, kLabModuleCount> moduleEqAny_{};
+    std::vector<float> eqScratchL_, eqScratchR_; // module-EQ input scratch
+
+    PeakingBand eq_[8][2]; // legacy preset EQ (kept for compatibility)
     std::array<bool, 8> eqActive_{};
+
+    // --- VoiceLab: tremolo / flanger / phaser
+    float tremoloPhase_ = 0.0f;
+
+    static constexpr std::size_t kFlangerDelayCapacity = 2048; // > 15 ms @ 48 kHz
+    daisysp::DelayLine<float, kFlangerDelayCapacity> flangerDelay_[2];
+    float flangerPhase_ = 0.0f;
+
+    static constexpr std::size_t kPhaserStages = 6;
+    float phaserX_[2][kPhaserStages] = {};
+    float phaserY_[2][kPhaserStages] = {};
+    float phaserPhase_ = 0.0f;
+
+    // --- VoiceLab: wahwah
+    Iir::Butterworth::BandPass<2> wahwahBand_[2];
+    float wahwahPhase_ = 0.0f;
+
+    // --- VoiceLab: stutter (fixed capture buffers, allocated in the ctor)
+    std::vector<float> stutterBufL_, stutterBufR_;
+    std::size_t stutterSlice_ = 0;     // current slice length in samples
+    std::size_t stutterCapture_ = 0;   // samples captured so far
+    std::size_t stutterPlayback_ = 0;  // position inside the captured slice
+    int stutterRepeatsLeft_ = 0;
+    int stutterRepeatsTotal_ = 1;
+
+    // --- VoiceLab: compressor
+    float compEnv_[2] = {};
+    float compAttack_ = 0.0f;
+    float compRelease_ = 0.0f;
+
+    // --- VoiceLab: octaver (dedicated pitch shifters, not the Clone twin)
+    daisysp::PitchShifter octave_[2];
 
     // --- master
     signalsmith::basics::LimiterFloat limiter_{10.0}; // max 10 ms lookahead
@@ -199,12 +255,12 @@ public:
     // Audio thread: drop reverb/delay/stretch tails (VAD sleep transition).
     void resetTail();
 
-    // Any thread.
+    // Any thread. `target` changes as soon as SetPreset is consumed, while
+    // `active` changes only after the A/B crossfade completes.
     int activePresetIndex() const { return curIdx_.load(std::memory_order_relaxed); }
-    // Audio thread only (also inspects the pending crossfade target).
+    int targetPresetIndex() const { return targetIdx_.load(std::memory_order_relaxed); }
     bool matchesPreset(int index) const {
-        const int target = pending_ >= 0 ? pendingIdx_ : curIdx_.load(std::memory_order_relaxed);
-        return target == index;
+        return targetIdx_.load(std::memory_order_relaxed) == index;
     }
     float latencyMs() const { return latencyMs_.load(std::memory_order_relaxed); }
     // Audio thread: longest tail among active and crossfade-target chains.
@@ -225,6 +281,7 @@ private:
     std::vector<float> outA_, outB_; // crossfade scratch
 
     std::atomic<int> curIdx_{-1};
+    std::atomic<int> targetIdx_{-1};
     std::atomic<float> latencyMs_{0.0f};
 };
 

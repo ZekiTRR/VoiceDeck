@@ -123,7 +123,7 @@ public:
         return kPeriodFrames[latencyMode_.load(std::memory_order_relaxed)];
     }
     bool dspOn() const { return dspOn_.load(std::memory_order_relaxed); }
-    int voicePresetIndex() const { return voice_.activePresetIndex(); }
+    int voicePresetIndex() const { return voice_.targetPresetIndex(); }
     float voiceLatencyMs() const { return voice_.latencyMs(); }
     // Honest estimate of the whole mic -> virtual-cable path: device periods,
     // average mic-ring backlog, the character chain and (when active) AI.

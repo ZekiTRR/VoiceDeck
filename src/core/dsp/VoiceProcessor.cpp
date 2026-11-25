@@ -34,9 +34,11 @@ constexpr float kChorusDry = 0.75f;
 constexpr float kChorusWet = 0.45f;
 constexpr float kFeedbackDelayWet = 0.35f;
 
-constexpr std::array<std::string_view, 11> kLabModuleNames = {
+static_assert(kLabModuleCount == 19, "keep the module enum and name table in sync");
+constexpr std::array<std::string_view, kLabModuleCount> kLabModuleNames = {
     "none", "pitch", "formant", "vocoder", "bitcrusher", "ringmod",
-    "distortion", "chorus", "reverb", "delay", "eq"
+    "distortion", "chorus", "reverb", "delay", "eq", "tremolo", "flanger",
+    "phaser", "wahwah", "stutter", "stereowidth", "compressor", "octaver"
 };
 
 // Match the existing engine-level peaking EQ (Q = 0.9).
@@ -73,11 +75,19 @@ LabModule parseLabModule(const std::string& s) {
     if (s == "reverb") return LabModule::Reverb;
     if (s == "delay") return LabModule::Delay;
     if (s == "eq") return LabModule::Eq;
+    if (s == "tremolo") return LabModule::Tremolo;
+    if (s == "flanger") return LabModule::Flanger;
+    if (s == "phaser") return LabModule::Phaser;
+    if (s == "wahwah") return LabModule::Wahwah;
+    if (s == "stutter") return LabModule::Stutter;
+    if (s == "stereowidth") return LabModule::Stereowidth;
+    if (s == "compressor") return LabModule::Compressor;
+    if (s == "octaver") return LabModule::Octaver;
     return LabModule::None;
 }
 
-std::array<VoiceLabParams, 11> makeDefaultLabParams() {
-    std::array<VoiceLabParams, 11> params{};
+std::array<VoiceLabParams, kLabModuleCount> makeDefaultLabParams() {
+    std::array<VoiceLabParams, kLabModuleCount> params{};
     for (std::size_t i = 0; i < params.size(); ++i)
         params[i] = defaultVoiceLabParams(kLabModuleNames[i]);
     return params;
@@ -149,7 +159,9 @@ VoiceChain::VoiceChain(double sampleRate)
       lpf_{},
       comb_{},
       twin_{},
-      crush_{} {
+      crush_{},
+      wahwahBand_{},
+      octave_{} {
     labParams_ = makeDefaultLabParams();
     const std::size_t n = kMaxBlock;
     inL_.resize(n); inR_.resize(n);
@@ -157,6 +169,12 @@ VoiceChain::VoiceChain(double sampleRate)
     xL_.resize(n);  xR_.resize(n);
     spL_.resize(n); spR_.resize(n);
     fL_.resize(n);  fR_.resize(n);
+    eqScratchL_.resize(n); eqScratchR_.resize(n);
+    // 500 ms of capture at the current rate, plus a little headroom.
+    const std::size_t stutterCapacity =
+        std::max<std::size_t>(64, static_cast<std::size_t>(std::ceil(0.5 * sr_)) + 2);
+    stutterBufL_.resize(stutterCapacity);
+    stutterBufR_.resize(stutterCapacity);
 
     // One-shot module configuration (runs before audio starts, so it may allocate).
     // Stretch block size follows the engine's latency mode:
@@ -171,6 +189,10 @@ VoiceChain::VoiceChain(double sampleRate)
     limiter_.releaseMs = 60.0;
 
     resetClone();
+    resetOctaver();
+    resetStutter();
+    compAttack_ = float(1.0 - std::exp(-1.0 / (0.005 * sr_)));
+    compRelease_ = float(1.0 - std::exp(-1.0 / (0.120 * sr_)));
     const std::size_t combDelay = std::max<std::size_t>(
         2, static_cast<std::size_t>(kRobotCombDelaySec * sr_));
     const float feedbackDelay = std::clamp(
@@ -183,8 +205,12 @@ VoiceChain::VoiceChain(double sampleRate)
         feedbackDelay_[c].Reset();
         feedbackDelay_[c].SetDelay(feedbackDelay);
         chorusDelay_[c].Reset();
+        flangerDelay_[c].Reset();
         bp_[c].setup(sr_, 1000.0, 500.0);
         lpf_[c].setup(sr_, 2800.0);
+        const double wahCenter = std::max(
+            100.0, double(labParams_[std::size_t(LabModule::Wahwah)].value2));
+        wahwahBand_[c].setup(sr_, wahCenter, std::max(60.0, wahCenter * 0.35));
     }
 
     configureVoiceLabVocoder(labParams_[std::size_t(LabModule::Vocoder)]);
@@ -329,6 +355,29 @@ void VoiceChain::resetClone() {
     }
 }
 
+void VoiceChain::resetOctaver() {
+    for (int c = 0; c < 2; ++c) {
+        // As with the Clone twin: zero the storage first, Init() leaves some
+        // scalars untouched. This shifter is permanently set an octave down.
+        octave_[c].~PitchShifter();
+        std::memset(&octave_[c], 0, sizeof(octave_[c]));
+        new (static_cast<void*>(&octave_[c])) daisysp::PitchShifter();
+        octave_[c].Init(float(sr_), /*quantize_semitones=*/true);
+        octave_[c].SetDelSize(1440);
+        octave_[c].SetTransposition(-12.0f);
+    }
+}
+
+void VoiceChain::resetStutter() {
+    std::fill(stutterBufL_.begin(), stutterBufL_.end(), 0.0f);
+    std::fill(stutterBufR_.begin(), stutterBufR_.end(), 0.0f);
+    stutterSlice_ = 0;
+    stutterCapture_ = 0;
+    stutterPlayback_ = 0;
+    stutterRepeatsLeft_ = 0;
+    stutterRepeatsTotal_ = 1;
+}
+
 void VoiceChain::configure(const VoicePreset& p) {
     // Copy only scalar/EQ values. The module map is read by reference and
     // flattened into a fixed array: no preset strings, map nodes, or heap storage
@@ -341,18 +390,23 @@ void VoiceChain::configure(const VoicePreset& p) {
     for (int b = 0; b < 8; ++b) params_.eq[b] = finiteOr(p.eq[b], 0.0f);
 
     auto labParams = makeDefaultLabParams();
+    labParamsPresent_.fill(false);
     bool hasPitchParams = false;
     bool hasFormantParams = false;
     for (const auto& entry : p.moduleParams) {
         const std::string_view name(entry.first);
         for (std::size_t i = 1; i < labParams.size(); ++i) {
             if (name != kLabModuleNames[i]) continue;
+            labParamsPresent_[i] = true;
             VoiceLabParams& dst = labParams[i];
             const VoiceLabParams& src = entry.second;
             dst.mix = finiteOr(src.mix, dst.mix);
             dst.value = finiteOr(src.value, dst.value);
             dst.value2 = finiteOr(src.value2, dst.value2);
             dst.value3 = finiteOr(src.value3, dst.value3);
+            for (int b = 0; b < 8; ++b)
+                dst.eq[b] = std::clamp(finiteOr(src.eq[b], 0.0f), -12.0f, 12.0f);
+            dst.eqProvided = src.eqProvided;
             if (i == std::size_t(LabModule::Pitch)) hasPitchParams = true;
             if (i == std::size_t(LabModule::Formant)) hasFormantParams = true;
             break;
@@ -409,6 +463,39 @@ void VoiceChain::configure(const VoicePreset& p) {
             case LabModule::Delay:
                 value.value = std::clamp(value.value, 20.0f, 800.0f);
                 value.value2 = std::clamp(value.value2, 0.0f, 0.9f);
+                break;
+            case LabModule::Tremolo:
+                value.value = std::clamp(value.value, 0.1f, 20.0f);
+                value.value2 = std::clamp(value.value2, 0.0f, 1.0f);
+                break;
+            case LabModule::Flanger:
+                value.value = std::clamp(value.value, 0.05f, 5.0f);
+                value.value2 = std::clamp(value.value2, 0.5f, 15.0f);
+                value.value3 = std::clamp(value.value3, 0.0f, 0.8f);
+                break;
+            case LabModule::Phaser:
+                value.value = std::clamp(value.value, 0.1f, 10.0f);
+                value.value2 = std::clamp(value.value2, 0.0f, 1.0f);
+                break;
+            case LabModule::Wahwah:
+                value.value = std::clamp(value.value, 0.1f, 10.0f);
+                value.value2 = std::clamp(value.value2, 200.0f, 3000.0f);
+                value.value3 = std::clamp(value.value3, 0.0f, 2.0f);
+                break;
+            case LabModule::Stutter:
+                value.value = std::clamp(value.value, 40.0f, 500.0f);
+                value.value2 = std::clamp(std::round(value.value2), 1.0f, 8.0f);
+                break;
+            case LabModule::Stereowidth:
+                value.value = std::clamp(value.value, 0.0f, 3.0f);
+                break;
+            case LabModule::Compressor:
+                value.value = std::clamp(value.value, -40.0f, 0.0f);
+                value.value2 = std::clamp(value.value2, 1.0f, 12.0f);
+                value.value3 = std::clamp(value.value3, 0.0f, 12.0f);
+                break;
+            case LabModule::Octaver:
+                value.value = std::clamp(value.value, 0.0f, 1.0f);
                 break;
             case LabModule::None:
             case LabModule::Eq:
@@ -491,6 +578,15 @@ void VoiceChain::configure(const VoicePreset& p) {
                 addTail(voiceLabDelayTailSeconds(moduleParams));
             } else if (item.module == LabModule::Chorus) {
                 addTail(std::max(0.3, double(moduleParams.value2 + moduleParams.value3) * 0.001));
+            } else if (item.module == LabModule::Flanger) {
+                // Modulated delay plus its feedback recirculation.
+                addTail(0.02 + double(moduleParams.value2) * 0.001 *
+                               (1.0 + 4.0 * double(moduleParams.value3)));
+            } else if (item.module == LabModule::Phaser) {
+                addTail(0.05); // cascaded all-pass ringing
+            } else if (item.module == LabModule::Stutter) {
+                const double slice = double(moduleParams.value) * 0.001;
+                addTail(slice * std::max(1.0, double(moduleParams.value2)) + 0.05);
             }
         }
         if (item.kind == ChainItem::Kind::Effect) {
@@ -532,6 +628,34 @@ void VoiceChain::configure(const VoicePreset& p) {
         eqActive_[b] = gain != 0.0f;
         for (int c = 0; c < 2; ++c) eq_[b][c].setup(sr_, kEqFrequency[b], gain);
     }
+
+    // Independent 8-band EQ for every module. The standalone Eq module uses
+    // its own values, falling back to the preset EQ only when no moduleParams
+    // entry existed for it.
+    for (std::size_t m = 1; m < kLabModuleCount; ++m) {
+        const float* gains = labParams_[m].eq;
+        if (m == std::size_t(LabModule::Eq) &&
+            (!labParamsPresent_[m] || !labParams_[m].eqProvided))
+            gains = params_.eq;
+        bool any = false;
+        for (std::size_t b = 0; b < 8; ++b) {
+            const float gain = std::clamp(finiteOr(gains[b], 0.0f), -12.0f, 12.0f);
+            moduleEqActive_[m][b] = gain != 0.0f;
+            any = any || moduleEqActive_[m][b];
+            for (int c = 0; c < 2; ++c)
+                moduleEq_[m][b][c].setup(sr_, kEqFrequency[b], gain);
+        }
+        moduleEqAny_[m] = any;
+    }
+
+    compAttack_ = float(1.0 - std::exp(-1.0 / (0.005 * sr_)));
+    compRelease_ = float(1.0 - std::exp(-1.0 / (0.120 * sr_)));
+    const double wahCenter = std::max(
+        100.0, double(labParams_[std::size_t(LabModule::Wahwah)].value2));
+    for (int c = 0; c < 2; ++c)
+        wahwahBand_[c].setup(sr_, wahCenter, std::max(60.0, wahCenter * 0.35));
+    resetStutter();
+
     configureVoiceLabVocoder(labParams_[std::size_t(LabModule::Vocoder)]);
 
     stretchStages_ = 0;
@@ -681,12 +805,35 @@ void VoiceChain::applyEffect(Effect effect, float* dstL, float* dstR, std::size_
 void VoiceChain::applyVoiceLab(LabModule module, const float* srcL, const float* srcR,
                                float* dstL, float* dstR, std::size_t frames,
                                float transposeOv, float formantOv) {
-    const VoiceLabParams& moduleParams = labParams_[std::size_t(module)];
+    const std::size_t moduleIndex = std::size_t(module);
+    const VoiceLabParams& moduleParams = labParams_[moduleIndex];
     const float mix = moduleParams.mix;
     if (mix <= 0.0f) {
         std::memcpy(dstL, srcL, frames * sizeof(float));
         std::memcpy(dstR, srcR, frames * sizeof(float));
         return;
+    }
+
+    // Each module owns an independent 8-band EQ. Except for the standalone Eq
+    // module (which *is* that EQ), it filters the module input before the
+    // effect. A dedicated scratch buffer keeps source and output unaliased.
+    const float* inL = srcL;
+    const float* inR = srcR;
+    if (module != LabModule::Eq && moduleEqAny_[moduleIndex]) {
+        for (int c = 0; c < 2; ++c) {
+            const float* input = (c == 0) ? srcL : srcR;
+            float* output = (c == 0) ? eqScratchL_.data() : eqScratchR_.data();
+            for (std::size_t i = 0; i < frames; ++i) {
+                float sample = input[i];
+                for (std::size_t b = 0; b < 8; ++b) {
+                    if (moduleEqActive_[moduleIndex][b])
+                        sample = moduleEq_[moduleIndex][b][c].process(sample);
+                }
+                output[i] = sample;
+            }
+        }
+        inL = eqScratchL_.data();
+        inR = eqScratchR_.data();
     }
 
     switch (module) {
@@ -701,21 +848,21 @@ void VoiceChain::applyVoiceLab(LabModule module, const float* srcL, const float*
             }
             pitch = std::clamp(pitch, -24.0f, 24.0f);
             if (voiceLabPitchActive(moduleParams, transposeOv)) {
-                processStretch(srcL, srcR, dstL, dstR, frames, pitch, 0.0f);
+                processStretch(inL, inR, dstL, dstR, frames, pitch, 0.0f);
             } else {
-                std::memcpy(dstL, srcL, frames * sizeof(float));
-                std::memcpy(dstR, srcR, frames * sizeof(float));
+                std::memcpy(dstL, inL, frames * sizeof(float));
+                std::memcpy(dstR, inR, frames * sizeof(float));
             }
             break;
         }
         case LabModule::Formant: {
             const float formant = voiceLabFormantSemitones(moduleParams, formantOv);
             if (formant != 0.0f) {
-                processStretch(srcL, srcR, dstL, dstR, frames, 0.0f, formant,
+                processStretch(inL, inR, dstL, dstR, frames, 0.0f, formant,
                                moduleParams.value2);
             } else {
-                std::memcpy(dstL, srcL, frames * sizeof(float));
-                std::memcpy(dstR, srcR, frames * sizeof(float));
+                std::memcpy(dstL, inL, frames * sizeof(float));
+                std::memcpy(dstR, inR, frames * sizeof(float));
             }
             break;
         }
@@ -724,7 +871,7 @@ void VoiceChain::applyVoiceLab(LabModule module, const float* srcL, const float*
             for (std::size_t i = 0; i < frames; ++i) {
                 float carrier = 2.0f * vocoderPhase_ - 1.0f;
                 carrier -= polyBlep(vocoderPhase_, phaseStep);
-                const float modulator = 0.5f * (srcL[i] + srcR[i]);
+                const float modulator = 0.5f * (inL[i] + inR[i]);
                 float bandSum = 0.0f;
                 for (std::size_t b = 0; b < kVocoderBands; ++b) {
                     const float analysis = float(vocoderAnalysis_[b].filter(double(modulator)));
@@ -739,8 +886,8 @@ void VoiceChain::applyVoiceLab(LabModule module, const float* srcL, const float*
                 }
                 // A little direct speech keeps consonants intelligible; the
                 // harmonically rich carrier supplies the robotic formants.
-                dstL[i] = srcL[i] * 0.12f + bandSum * 0.65f;
-                dstR[i] = srcR[i] * 0.12f + bandSum * 0.65f;
+                dstL[i] = inL[i] * 0.12f + bandSum * 0.65f;
+                dstR[i] = inR[i] * 0.12f + bandSum * 0.65f;
                 vocoderPhase_ = wrapPhase(vocoderPhase_ + phaseStep, 1.0f);
             }
             break;
@@ -755,8 +902,8 @@ void VoiceChain::applyVoiceLab(LabModule module, const float* srcL, const float*
                 crush_[c].SetBitsToCrush(bits);
             }
             for (std::size_t i = 0; i < frames; ++i) {
-                dstL[i] = crush_[0].Process(srcL[i]) * kVoiceLabBitGain;
-                dstR[i] = crush_[1].Process(srcR[i]) * kVoiceLabBitGain;
+                dstL[i] = crush_[0].Process(inL[i]) * kVoiceLabBitGain;
+                dstR[i] = crush_[1].Process(inR[i]) * kVoiceLabBitGain;
             }
             break;
         }
@@ -766,8 +913,8 @@ void VoiceChain::applyVoiceLab(LabModule module, const float* srcL, const float*
             for (std::size_t i = 0; i < frames; ++i) {
                 const float carrier = float(std::sin(double(ringPhase_)));
                 const float modulator = (1.0f - depth) + depth * carrier;
-                dstL[i] = srcL[i] * modulator;
-                dstR[i] = srcR[i] * modulator;
+                dstL[i] = inL[i] * modulator;
+                dstR[i] = inR[i] * modulator;
                 ringPhase_ = wrapPhase(ringPhase_ + ringStep, kTwoPi);
             }
             break;
@@ -775,8 +922,8 @@ void VoiceChain::applyVoiceLab(LabModule module, const float* srcL, const float*
         case LabModule::Distortion: {
             const float drive = moduleParams.value;
             if (drive <= 0.0f) {
-                std::memcpy(dstL, srcL, frames * sizeof(float));
-                std::memcpy(dstR, srcR, frames * sizeof(float));
+                std::memcpy(dstL, inL, frames * sizeof(float));
+                std::memcpy(dstR, inR, frames * sizeof(float));
                 break;
             }
             // The default 0.55 reproduces the previous 2.4/1.8 drive stages.
@@ -784,10 +931,10 @@ void VoiceChain::applyVoiceLab(LabModule module, const float* srcL, const float*
             const float hardGain = 0.75f * softGain;
             const float hardMix = 0.15f + (0.30f / 0.55f) * drive;
             for (std::size_t i = 0; i < frames; ++i) {
-                const float leftSoft = softClip(srcL[i] * softGain);
-                const float rightSoft = softClip(srcR[i] * softGain);
-                const float leftHard = std::clamp(srcL[i] * hardGain, -1.0f, 1.0f);
-                const float rightHard = std::clamp(srcR[i] * hardGain, -1.0f, 1.0f);
+                const float leftSoft = softClip(inL[i] * softGain);
+                const float rightSoft = softClip(inR[i] * softGain);
+                const float leftHard = std::clamp(inL[i] * hardGain, -1.0f, 1.0f);
+                const float rightHard = std::clamp(inR[i] * hardGain, -1.0f, 1.0f);
                 dstL[i] = leftSoft * (1.0f - hardMix) + leftHard * hardMix;
                 dstR[i] = rightSoft * (1.0f - hardMix) + rightHard * hardMix;
             }
@@ -805,10 +952,10 @@ void VoiceChain::applyVoiceLab(LabModule module, const float* srcL, const float*
                 const float rightMod = float(std::cos(angle)); // quarter-cycle offset
                 const float leftDelayed = chorusDelay_[0].ReadHermite(base + depth * leftMod);
                 const float rightDelayed = chorusDelay_[1].ReadHermite(base + depth * rightMod);
-                chorusDelay_[0].Write(srcL[i]);
-                chorusDelay_[1].Write(srcR[i]);
-                dstL[i] = srcL[i] * kChorusDry + leftDelayed * kChorusWet;
-                dstR[i] = srcR[i] * kChorusDry + rightDelayed * kChorusWet;
+                chorusDelay_[0].Write(inL[i]);
+                chorusDelay_[1].Write(inR[i]);
+                dstL[i] = inL[i] * kChorusDry + leftDelayed * kChorusWet;
+                dstR[i] = inR[i] * kChorusDry + rightDelayed * kChorusWet;
                 chorusPhase_ = wrapPhase(chorusPhase_ + phaseStep, 1.0f);
             }
             break;
@@ -816,7 +963,7 @@ void VoiceChain::applyVoiceLab(LabModule module, const float* srcL, const float*
         case LabModule::Reverb:
             if (!voiceLabReverbActive_) configureVoiceLabReverb(moduleParams);
             {
-                float* input[2] = {const_cast<float*>(srcL), const_cast<float*>(srcR)};
+                float* input[2] = {const_cast<float*>(inL), const_cast<float*>(inR)};
                 float* output[2] = {dstL, dstR};
                 reverb_.process(input, output, frames);
             }
@@ -826,32 +973,211 @@ void VoiceChain::applyVoiceLab(LabModule module, const float* srcL, const float*
             for (std::size_t i = 0; i < frames; ++i) {
                 const float leftDelayed = feedbackDelay_[0].Read();
                 const float rightDelayed = feedbackDelay_[1].Read();
-                feedbackDelay_[0].Write(srcL[i] + leftDelayed * feedback);
-                feedbackDelay_[1].Write(srcR[i] + rightDelayed * feedback);
-                dstL[i] = srcL[i] + leftDelayed * kFeedbackDelayWet;
-                dstR[i] = srcR[i] + rightDelayed * kFeedbackDelayWet;
+                feedbackDelay_[0].Write(inL[i] + leftDelayed * feedback);
+                feedbackDelay_[1].Write(inR[i] + rightDelayed * feedback);
+                dstL[i] = inL[i] + leftDelayed * kFeedbackDelayWet;
+                dstR[i] = inR[i] + rightDelayed * kFeedbackDelayWet;
             }
             break;
         }
         case LabModule::Eq:
-            // params_.eq retains the preset's eight band values; the common
-            // crossfade below applies Eq.mix at this module's chain position.
+            // The standalone EQ's own eq[8] was configured into moduleEq_[Eq]
+            // (with a legacy preset-EQ fallback). The common crossfade below
+            // applies Eq.mix at this module's chain position.
             for (int c = 0; c < 2; ++c) {
                 const float* input = (c == 0) ? srcL : srcR;
                 float* output = (c == 0) ? dstL : dstR;
                 for (std::size_t i = 0; i < frames; ++i) {
                     float sample = input[i];
                     for (int b = 0; b < 8; ++b) {
-                        if (eqActive_[b]) sample = eq_[b][c].process(sample);
+                        if (moduleEqActive_[moduleIndex][b])
+                            sample = moduleEq_[moduleIndex][b][c].process(sample);
                     }
                     output[i] = sample;
                 }
             }
             break;
+        case LabModule::Tremolo: {
+            const float depth = moduleParams.value2;
+            const float phaseStep = float(kTwoPi * double(moduleParams.value) / sr_);
+            for (std::size_t i = 0; i < frames; ++i) {
+                const float gain = (1.0f - depth) +
+                                   depth * (0.5f + 0.5f * float(std::sin(double(tremoloPhase_))));
+                dstL[i] = inL[i] * gain;
+                dstR[i] = inR[i] * gain;
+                tremoloPhase_ = wrapPhase(tremoloPhase_ + phaseStep, kTwoPi);
+            }
+            break;
+        }
+        case LabModule::Flanger: {
+            // A short (~0.5..15 ms) LFO-swept delay with feedback: deliberately
+            // distinct from Chorus (long base delay, no feedback).
+            const float maxDelay = std::max(
+                1.0f, float(moduleParams.value2 * 0.001f * float(sr_)));
+            const float base = std::max(1.0f, 0.5f * maxDelay);
+            const float depth = std::max(0.0f, maxDelay - base);
+            const float feedback = std::clamp(moduleParams.value3, 0.0f, 0.8f);
+            const float phaseStep = float(moduleParams.value / sr_);
+            for (std::size_t i = 0; i < frames; ++i) {
+                const double angle = 2.0 * kPi * double(flangerPhase_);
+                const float leftDelay = std::clamp(
+                    base + depth * float(std::sin(angle)), 1.0f, maxDelay);
+                const float rightDelay = std::clamp(
+                    base + depth * float(std::cos(angle)), 1.0f, maxDelay);
+                const float leftDelayed = flangerDelay_[0].ReadHermite(leftDelay);
+                const float rightDelayed = flangerDelay_[1].ReadHermite(rightDelay);
+                flangerDelay_[0].Write(inL[i] + feedback * leftDelayed);
+                flangerDelay_[1].Write(inR[i] + feedback * rightDelayed);
+                dstL[i] = 0.72f * inL[i] + 0.72f * leftDelayed;
+                dstR[i] = 0.72f * inR[i] + 0.72f * rightDelayed;
+                flangerPhase_ = wrapPhase(flangerPhase_ + phaseStep, 1.0f);
+            }
+            break;
+        }
+        case LabModule::Phaser: {
+            // Six cascaded first-order all-pass sections with an LFO-swept
+            // coefficient. Each channel/stage keeps its own two-sample state.
+            const float phaseStep = float(kTwoPi * double(moduleParams.value) / sr_);
+            const float depth = moduleParams.value2;
+            for (std::size_t i = 0; i < frames; ++i) {
+                const float coefficient =
+                    0.72f * depth * float(std::sin(double(phaserPhase_)));
+                float left = inL[i];
+                float right = inR[i];
+                for (std::size_t s = 0; s < kPhaserStages; ++s) {
+                    const float ly = coefficient * left + phaserX_[0][s] -
+                                     coefficient * phaserY_[0][s];
+                    phaserX_[0][s] = left;
+                    phaserY_[0][s] = ly;
+                    left = ly;
+                    const float ry = coefficient * right + phaserX_[1][s] -
+                                     coefficient * phaserY_[1][s];
+                    phaserX_[1][s] = right;
+                    phaserY_[1][s] = ry;
+                    right = ry;
+                }
+                dstL[i] = 0.7f * inL[i] + 0.7f * left;
+                dstR[i] = 0.7f * inR[i] + 0.7f * right;
+                phaserPhase_ = wrapPhase(phaserPhase_ + phaseStep, kTwoPi);
+            }
+            break;
+        }
+        case LabModule::Wahwah: {
+            // One filter reconfiguration per block from the current LFO phase.
+            const float sweep = float(std::sin(2.0 * kPi * double(wahwahPhase_)));
+            const float center = std::clamp(
+                moduleParams.value2 * std::pow(2.0f, moduleParams.value3 * sweep),
+                100.0f, float(sr_ * 0.45));
+            const double bandwidth = std::max(60.0, double(center) * 0.35);
+            for (int c = 0; c < 2; ++c)
+                wahwahBand_[c].setup(sr_, center, bandwidth);
+            for (std::size_t i = 0; i < frames; ++i) {
+                dstL[i] = 0.3f * inL[i] + 1.4f * float(wahwahBand_[0].filter(double(inL[i])));
+                dstR[i] = 0.3f * inR[i] + 1.4f * float(wahwahBand_[1].filter(double(inR[i])));
+            }
+            wahwahPhase_ = wrapPhase(
+                wahwahPhase_ + float(moduleParams.value * double(frames) / sr_), 1.0f);
+            break;
+        }
+        case LabModule::Stutter: {
+            // Capture a slice, repeat it N times, then resume live input.
+            // All counters persist across blocks; buffers are preallocated.
+            const std::size_t capacity = stutterBufL_.size();
+            if (stutterRepeatsLeft_ == 0 && stutterCapture_ == 0) {
+                const float sliceMs = moduleParams.value;
+                stutterSlice_ = std::clamp<std::size_t>(
+                    static_cast<std::size_t>(std::lround(sliceMs * 0.001f * float(sr_))),
+                    1, capacity - 1);
+                stutterRepeatsTotal_ = std::clamp(
+                    static_cast<int>(std::lround(moduleParams.value2)), 1, 8);
+            }
+            const std::size_t slice = std::max<std::size_t>(1, stutterSlice_);
+            for (std::size_t i = 0; i < frames; ++i) {
+                if (stutterRepeatsLeft_ > 0) {
+                    const std::size_t pos = stutterPlayback_ % slice;
+                    dstL[i] = stutterBufL_[pos];
+                    dstR[i] = stutterBufR_[pos];
+                    if (++stutterPlayback_ >= slice) {
+                        stutterPlayback_ = 0;
+                        if (--stutterRepeatsLeft_ <= 0) {
+                            stutterRepeatsLeft_ = 0;
+                            stutterCapture_ = 0; // resume live / arm next slice
+                        }
+                    }
+                } else {
+                    dstL[i] = inL[i];
+                    dstR[i] = inR[i];
+                    if (stutterCapture_ < slice) {
+                        stutterBufL_[stutterCapture_] = inL[i];
+                        stutterBufR_[stutterCapture_] = inR[i];
+                        if (++stutterCapture_ >= slice) {
+                            stutterRepeatsLeft_ = stutterRepeatsTotal_;
+                            stutterPlayback_ = 0;
+                        }
+                    }
+                }
+            }
+            break;
+        }
+        case LabModule::Stereowidth: {
+            const float width = std::clamp(moduleParams.value, 0.0f, 3.0f);
+            // Width=1 is an exact pass-through; the mid channel is untouched,
+            // so mono folding stays compatible at every width.
+            const float gain = 1.0f / std::max(1.0f, 0.5f * (1.0f + width));
+            for (std::size_t i = 0; i < frames; ++i) {
+                const float mid = 0.5f * (inL[i] + inR[i]);
+                const float side = 0.5f * (inL[i] - inR[i]);
+                dstL[i] = (mid + side * width) * gain;
+                dstR[i] = (mid - side * width) * gain;
+            }
+            break;
+        }
+        case LabModule::Compressor: {
+            constexpr float kKneeDb = 4.0f;
+            const float thresholdDb = moduleParams.value;
+            const float ratio = std::max(1.0f, moduleParams.value2);
+            const float makeup = std::pow(10.0f, moduleParams.value3 / 20.0f);
+            for (std::size_t i = 0; i < frames; ++i) {
+                for (int c = 0; c < 2; ++c) {
+                    const float input = (c == 0) ? inL[i] : inR[i];
+                    const float envelope = followEnvelope(
+                        input, compEnv_[c], compAttack_, compRelease_);
+                    const float envDb = 20.0f * std::log10(std::max(envelope, 1e-6f));
+                    float gainDb = 0.0f;
+                    if (envDb > thresholdDb - 0.5f * kKneeDb) {
+                        if (envDb < thresholdDb + 0.5f * kKneeDb) {
+                            const float over = envDb - thresholdDb + 0.5f * kKneeDb;
+                            gainDb = (1.0f / ratio - 1.0f) * over * over / (2.0f * kKneeDb);
+                        } else {
+                            gainDb = (1.0f / ratio - 1.0f) * (envDb - thresholdDb);
+                        }
+                    }
+                    const float sample = input * std::pow(10.0f, gainDb / 20.0f) * makeup;
+                    if (c == 0) dstL[i] = sample;
+                    else dstR[i] = sample;
+                }
+            }
+            break;
+        }
+        case LabModule::Octaver: {
+            const float blend = std::clamp(moduleParams.value, 0.0f, 1.0f);
+            for (std::size_t i = 0; i < frames; ++i) {
+                if (blend <= 0.0f) {
+                    dstL[i] = inL[i];
+                    dstR[i] = inR[i];
+                } else {
+                    const float leftShift = octave_[0].Process(inL[i]);
+                    const float rightShift = octave_[1].Process(inR[i]);
+                    dstL[i] = inL[i] * (1.0f - blend) + leftShift * blend;
+                    dstR[i] = inR[i] * (1.0f - blend) + rightShift * blend;
+                }
+            }
+            break;
+        }
         case LabModule::None:
         default:
-            std::memcpy(dstL, srcL, frames * sizeof(float));
-            std::memcpy(dstR, srcR, frames * sizeof(float));
+            std::memcpy(dstL, inL, frames * sizeof(float));
+            std::memcpy(dstR, inR, frames * sizeof(float));
             break;
     }
 
@@ -869,6 +1195,8 @@ void VoiceChain::resetTail() {
     crunch_.reset();
     limiter_.reset();
     if (usesClone_) resetClone();
+    resetOctaver();
+    resetStutter();
 
     const std::size_t combDelay = std::max<std::size_t>(
         2, static_cast<std::size_t>(kRobotCombDelaySec * sr_));
@@ -886,6 +1214,13 @@ void VoiceChain::resetTail() {
             feedbackDelay_[c].SetDelay(feedbackDelay);
         }
         chorusDelay_[c].Reset();
+        flangerDelay_[c].Reset();
+        wahwahBand_[c].reset();
+        compEnv_[c] = 0.0f;
+        for (std::size_t s = 0; s < kPhaserStages; ++s) {
+            phaserX_[c][s] = 0.0f;
+            phaserY_[c][s] = 0.0f;
+        }
     }
     for (std::size_t b = 0; b < kVocoderBands; ++b) {
         vocoderAnalysis_[b].reset();
@@ -895,6 +1230,11 @@ void VoiceChain::resetTail() {
     }
     for (int b = 0; b < 8; ++b) {
         for (int c = 0; c < 2; ++c) eq_[b][c].reset();
+    }
+    for (std::size_t m = 1; m < kLabModuleCount; ++m) {
+        for (std::size_t b = 0; b < 8; ++b) {
+            for (int c = 0; c < 2; ++c) moduleEq_[m][b][c].reset();
+        }
     }
 
     std::fill(inL_.begin(), inL_.end(), 0.0f);
@@ -907,11 +1247,17 @@ void VoiceChain::resetTail() {
     std::fill(spR_.begin(), spR_.end(), 0.0f);
     std::fill(fL_.begin(), fL_.end(), 0.0f);
     std::fill(fR_.begin(), fR_.end(), 0.0f);
+    std::fill(eqScratchL_.begin(), eqScratchL_.end(), 0.0f);
+    std::fill(eqScratchR_.begin(), eqScratchR_.end(), 0.0f);
     lfoPhase_ = 0.0f;
     pitchLfoPhase_ = 0.0f;
     ringPhase_ = 0.0f;
     vocoderPhase_ = 0.0f;
     chorusPhase_ = 0.0f;
+    tremoloPhase_ = 0.0f;
+    flangerPhase_ = 0.0f;
+    phaserPhase_ = 0.0f;
+    wahwahPhase_ = 0.0f;
 }
 
 void VoiceChain::process(const float* in, float* out, std::size_t frames, float transposeOv,
@@ -1065,6 +1411,7 @@ void VoiceProcessor::applyPreset(int index, const VoicePreset& p) {
     chains_[next].resetTail();
     pending_ = next;
     pendingIdx_ = index;
+    targetIdx_.store(index, std::memory_order_relaxed);
     fadePos_ = 0;
 }
 

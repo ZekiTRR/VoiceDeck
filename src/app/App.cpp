@@ -257,10 +257,10 @@ void App::startHotkeyService() {
                     if (onHotkeyEvent) onHotkeyEvent("soundPlayed");
                     break;
                 case HotkeyAction::Kind::Preset:
-                    c.type = Command::Type::SetPreset;
-                    c.soundId = a.id;
-                    engine.submit(c);
-                    if (onHotkeyEvent) onHotkeyEvent("presetChanged");
+                    // Route through applyPreset so a temporary editor override
+                    // is dropped exactly like a UI click on another character.
+                    if (applyPreset(int(a.id)) && onHotkeyEvent)
+                        onHotkeyEvent("presetChanged");
                     break;
                 case HotkeyAction::Kind::VoiceToggle:
                     c.type = Command::Type::SetDsp;
@@ -443,6 +443,12 @@ std::string App::setVadThresholdDb(float db) {
     engine.setVadThresholdDb(db);
     settings.save(settingsFile);
     return "";
+}
+
+void App::setLanguage(const std::string& language) {
+    if (language != "ru" && language != "en") return;
+    settings.language = language;
+    settings.save(settingsFile);
 }
 
 // ---------------------------------------------------------------- tags
@@ -1002,7 +1008,7 @@ int App::addPreset(const nlohmann::json& def, std::string& err) {
     }
     if (def.contains("chain") && def["chain"].is_array()) {
         for (const auto& c : def["chain"]) {
-            if (!c.is_string() || p.chain.size() >= 16) continue;
+            if (!c.is_string() || p.chain.size() >= 24) continue;
             std::string item = toLower(c.get<std::string>());
             if (isChainModule(item)) p.chain.push_back(std::move(item));
         }
@@ -1271,7 +1277,7 @@ void App::liveUpdatePreset(int idx, const nlohmann::json& def) {
     if (def.contains("chain") && def["chain"].is_array()) {
         p.chain.clear();
         for (const auto& c : def["chain"]) {
-            if (!c.is_string() || p.chain.size() >= 16) continue;
+            if (!c.is_string() || p.chain.size() >= 24) continue;
             std::string item = toLower(c.get<std::string>());
             if (isChainModule(item)) p.chain.push_back(std::move(item));
         }
@@ -1287,6 +1293,20 @@ void App::liveUpdatePreset(int idx, const nlohmann::json& def) {
             p.eq[i] = clampf(def["eq"][std::size_t(i)].get<double>(), -12, 12);
     }
     applyLivePreset(idx, p);
+}
+
+bool App::resetLivePreset() {
+    if (livePresetIndex_ < 0) return true;
+    const int idx = livePresetIndex_;
+    auto controlLock = engine.lockControl();
+    if (!engine.drainCommands(1000)) {
+        log::warn("live preset reset skipped: audio engine busy");
+        return false;
+    }
+    engine.setPresets(presets);
+    livePresetIndex_ = -1;
+    applyPreset(idx);
+    return true;
 }
 
 // ---------------------------------------------------------------- state
@@ -1359,6 +1379,7 @@ nlohmann::json App::statusJson() const {
     // one-callback race where a UI refresh could briefly show the old value.
     j["ambientOn"] = settings.ambientEnabled;
     j["soundFxSend"] = settings.soundFxSend;
+    j["language"] = settings.language;
     j["monitorOn"] = engine.monitorRunning();
     j["preset"] = engine.voicePresetIndex();
 
