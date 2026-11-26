@@ -1099,10 +1099,48 @@ input[type="range"]::-webkit-slider-thumb {
 .scard .tag, .srow .tag { font-size: 9.5px; padding: 2px 7px; }
 .tag-edit-btn { margin-left: auto; }
 
+/* ============ application capture ============ */
+.capture-list { display: flex; flex-direction: column; gap: 5px; margin: 10px 0; max-height: 310px; overflow-y: auto; }
+.capture-row {
+  display: flex; align-items: center; gap: 9px; padding: 7px 9px;
+  background: var(--bg2); border: 1px solid var(--line); border-radius: 5px;
+  font-size: 12px; cursor: pointer;
+}
+.capture-row:hover { border-color: var(--dim); }
+.capture-row input { flex: none; }
+.capture-info { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.capture-info b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.capture-info span { color: var(--dim); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.capture-badge {
+  font-size: 9.5px; color: var(--green); border: 1px solid rgba(46,204,113,.45);
+  border-radius: 4px; padding: 1px 5px; white-space: nowrap;
+}
+.capture-active { display: flex; flex-direction: column; gap: 7px; margin-top: 10px; }
+.capture-source {
+  display: grid; grid-template-columns: minmax(140px, 1fr) 110px 42px 98px 26px;
+  gap: 8px; align-items: center; padding: 8px 9px;
+  background: var(--bg2); border: 1px solid var(--line); border-radius: 5px;
+}
+.capture-source .capture-info { grid-column: 1 / -1; }
+.capture-source input[type=range] { width: 100%; }
+.capture-level { grid-column: 1 / -1; height: 3px; background: var(--bg1); border-radius: 2px; overflow: hidden; }
+.capture-level i { display: block; width: 0; height: 100%; background: var(--green); transition: width .08s linear; }
+.capture-state { font-size: 10px; color: var(--dim); white-space: nowrap; }
+
 /* ============ in-app audio editor ============ */
 .editor-dialog { width: 620px; max-width: 95vw; max-height: 92vh; overflow-y: auto; }
 .editor-head { display: flex; align-items: center; justify-content: space-between; }
 .editor-head h3 { margin-bottom: 8px; }
+.ew-spectrum {
+  display: block;
+  width: 100%;
+  height: 104px;
+  margin-bottom: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #080b12;
+  image-rendering: auto;
+}
 .ew-wave {
   position: relative;
   height: 110px;

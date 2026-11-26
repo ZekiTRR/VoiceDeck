@@ -1,4 +1,5 @@
 #include "core/engine/AudioEngine.hpp"
+#include "core/engine/SoftLimiter.hpp"
 #include "core/platform/ThreadAffinity.hpp"
 #include "core/settings/Settings.hpp"
 #include "core/util/Log.hpp"
@@ -57,11 +58,13 @@ bool AudioEngine::init() {
     if (ma_context_init(NULL, 0, NULL, &ctx_) != MA_SUCCESS) return false;
     ctxOk_ = true;
     queue_.start();
+    captureManager_.initialize();
     return true;
 }
 
 void AudioEngine::shutdown() {
     stopDevices();
+    captureManager_.shutdown();
     queue_.stop();
     if (ctxOk_) {
         ma_context_uninit(&ctx_);
@@ -735,6 +738,12 @@ void AudioEngine::playbackDataCb(ma_device* pDevice, void* pOutput, const void* 
                 self->monOverflows_.fetch_add(1, std::memory_order_relaxed);
         }
     }
+
+    // 7. Captured application audio goes to the virtual cable only. This runs
+    //    after the monitor copy so the original application audio is not
+    //    monitored twice. The final limiter is transparent below 0.85.
+    self->captureManager_.mixInto(out, frames);
+    for (std::size_t i = 0; i < frames * kChannels; ++i) out[i] = softLimit(out[i]);
 }
 
 void AudioEngine::monitorDataCb(ma_device* pDevice, void* pOutput, const void* /*pInput*/,

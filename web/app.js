@@ -60,7 +60,7 @@ let ewDrag=null;                    // {mode:'trim'|'sel', side, anchor}
 let liveTimer=null; // debounce for live preset updates
 const editorFaders=[], voiceFaders=[];
 
-const TITLES={voice:"Голосовые эффекты",sounds:"Саундборд",ai:"AI-голос",settings:"Устройства"};
+const TITLES={voice:"Голосовые эффекты",sounds:"Саундборд",ai:"AI-голос",capture:"Захват приложений",settings:"Устройства"};
 const EQ_FREQS=[200,400,800,1600,3200,6400,10000,12000];
 const SPACE_OPTS=["none","room","hall","cave","helmet","radio","megaphone"];
 const EFFECT_OPTS=["none","robot","alien","atari","clone","silence"];
@@ -323,6 +323,11 @@ function demoState(){
     devices:{capture:[{idx:0,name:"Микрофон (USB)",def:true}],
       playback:[{idx:0,name:"Line 1 (VAC)",def:true},{idx:1,name:"Динамики",def:false}],
       curCapture:0,curPlayback:0,curMonitor:-1,savedMonitor:-1,running:true},
+    capture:{supported:true,reason:"",processes:[
+      {pid:4242,name:"Discord.exe",title:"Discord",audible:true},
+      {pid:4343,name:"chrome.exe",title:"YouTube — Google Chrome",audible:true},
+      {pid:4444,name:"notepad.exe",title:"Заметки",audible:false}],
+      sources:[]},
     mic:0.03,voiceLatency:0,e2eLatency:47,micUnderruns:0,latencyMode:0,
     vadThresholdDb:-48,vadSleeping:false,hotkeys:{voice:"Ctrl+Alt+V",ai:"",stopAll:""}};
 }
@@ -362,7 +367,7 @@ function renderState(){
   $("monitorChk").checked=!!S.voiceMonitorOn;
   setSwitch($("soundboardMonitorBtn"),!!S.soundboardMonitor);
   syncOriginalOutputSelection();
-  renderPresets();renderTagFilter();renderSounds();renderAi();renderHotkeyBadges();
+  renderPresets();renderTagFilter();renderSounds();renderAi();renderHotkeyBadges();renderCapture();
   if(!settingsRenderedOnce){renderSettings();settingsRenderedOnce=true;}
   if(S.vadThresholdDb!=null&&document.activeElement!==$("vadThreshold")){
     $("vadThreshold").value=Math.round(S.vadThresholdDb);
@@ -903,7 +908,8 @@ $("tagDone").addEventListener("click",()=>{
 });
 
 // ---- In-app audio editor ---------------------------------------------------
-function closeEditDialog(){$("editOverlay").classList.add("hidden");editState=null;ewDrag=null;}
+let spectrumRaf=null;
+function closeEditDialog(){$("editOverlay").classList.add("hidden");editState=null;ewDrag=null;if(spectrumRaf){cancelAnimationFrame(spectrumRaf);spectrumRaf=null;}}
 function openEditDialog(id){
   const s=findSound(id);if(!s)return;
   const e=s.edits||{};
@@ -914,16 +920,88 @@ function openEditDialog(id){
     trimStart:Math.max(0,+e.trimStart||0),
     trimEnd:+(e.trimEnd>0?e.trimEnd:dur),
     gain:(e.gain!=null?+e.gain:1),
+    fadeIn:Math.min(dur,Math.max(0,+e.fadeIn||0)),
+    fadeOut:Math.min(dur,Math.max(0,+e.fadeOut||0)),
     regions:(e.regions||[]).map(r=>({start:+r.start,end:+r.end,gain:+r.gain})),
+    spectrum:null,
     sel:null
   };
   $("ewTitle").textContent="Редактор: "+s.name;
   $("ewGain").value=Math.round(editState.gain*100);
   $("ewGainVal").textContent=Math.round(editState.gain*100)+"%";
+  const maxFade=Math.max(0.01,dur);
+  $("ewFadeIn").max=String(maxFade);$("ewFadeOut").max=String(maxFade);
+  $("ewFadeIn").value=Math.min(maxFade,editState.fadeIn);
+  $("ewFadeOut").value=Math.min(maxFade,editState.fadeOut);
+  $("ewFadeInVal").textContent=editState.fadeIn.toFixed(2)+" с";
+  $("ewFadeOutVal").textContent=editState.fadeOut.toFixed(2)+" с";
   drawEditorWave();updateEditorValues();renderEditorRegions();
   $("editOverlay").classList.remove("hidden");
+  if(host)send({cmd:"soundSpectrum",id:id});
+  else editState.spectrum=demoSpectrum(s);
+  drawEditorSpectrum();
 }
 function editorPct(t){return Math.max(0,Math.min(100,(t/Math.max(0.001,editState.dur))*100));}
+function demoSpectrum(s){
+  const cols=192,bins=32,data=[];
+  const pk=s.rawPeaks||s.peaks||[];
+  for(let c=0;c<cols;c++){
+    const p=pk.length?pk[Math.min(pk.length-1,Math.floor(c/cols*pk.length))]:.2;
+    for(let b=0;b<bins;b++)data.push(Math.max(0,Math.min(127,Math.round(18+p*90*(1-b/bins*.55)))));
+  }
+  return {cols,bins,dbMin:-80,data};
+}
+function scheduleSpectrum(){
+  if(spectrumRaf)return;
+  spectrumRaf=requestAnimationFrame(()=>{spectrumRaf=null;drawEditorSpectrum();});
+}
+function spectrumEnvelopeAt(tSrc){
+  if(!editState)return 0;
+  const outDur=Math.max(0.001,editState.trimEnd-editState.trimStart);
+  if(tSrc<editState.trimStart||tSrc>editState.trimEnd)return -1;
+  const outT=tSrc-editState.trimStart;
+  let gain=Math.max(0,editState.gain);
+  for(const r of editState.regions||[]){
+    if(tSrc>=r.start&&tSrc<r.end)gain*=Math.max(0,+r.gain||0);
+  }
+  let fi=Math.max(0,Math.min(editState.fadeIn,outDur));
+  let fo=Math.max(0,Math.min(editState.fadeOut,outDur));
+  if(fi+fo>outDur&&fi+fo>0){const k=outDur/(fi+fo);fi*=k;fo*=k;}
+  if(fi>0&&outT<fi)gain*=Math.sin((outT/fi)*Math.PI/2);
+  const foStart=outDur-fo;
+  if(fo>0&&outT>=foStart)gain*=Math.cos(((outT-foStart)/fo)*Math.PI/2);
+  return gain;
+}
+function spectrumColor(v){
+  const stops=[[8,11,18],[20,36,74],[50,105,180],[245,166,35],[255,240,190]];
+  const x=Math.max(0,Math.min(1,v))*(stops.length-1),i=Math.min(stops.length-2,Math.floor(x)),f=x-i;
+  const a=stops[i],b=stops[i+1];
+  return `rgb(${Math.round(a[0]+(b[0]-a[0])*f)},${Math.round(a[1]+(b[1]-a[1])*f)},${Math.round(a[2]+(b[2]-a[2])*f)})`;
+}
+function drawEditorSpectrum(){
+  const canvas=$("ewSpectrum");if(!canvas)return;
+  const ctx=canvas.getContext("2d");
+  if(!editState||!editState.spectrum){ctx.clearRect(0,0,canvas.width,canvas.height);return;}
+  const sp=editState.spectrum,cols=sp.cols|0,bins=sp.bins|0,data=sp.data||[];
+  if(!cols||!bins)return;
+  const cell=4;canvas.width=cols*cell;canvas.height=bins*cell;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle="#080b12";ctx.fillRect(0,0,canvas.width,canvas.height);
+  for(let c=0;c<cols;c++){
+    const tSrc=(c+0.5)/cols*editState.dur;
+    const gain=spectrumEnvelopeAt(tSrc);
+    if(gain<0){ctx.fillStyle="#050608";ctx.fillRect(c*cell,0,cell,canvas.height);continue;}
+    const dbShift=20*Math.log10(Math.max(gain,1e-6));
+    for(let b=0;b<bins;b++){
+      const raw=data[c*bins+b]||0;
+      const db=(sp.dbMin??-80)+(raw/127)*80+dbShift;
+      const v=(db-(sp.dbMin??-80))/80;
+      if(v<=0.005)continue;
+      ctx.fillStyle=spectrumColor(v);
+      ctx.fillRect(c*cell,(bins-1-b)*cell,cell,cell);
+    }
+  }
+}
 function drawEditorWave(){
   const el=$("ewWave"),peaks=editState.peaks||[];
   const step=Math.max(1,Math.ceil(peaks.length/128));
@@ -996,6 +1074,7 @@ function updateEditorOverlays(){
     sel.style.left=editorPct(editState.sel.start)+"%";
     sel.style.width=Math.max(0,editorPct(editState.sel.end)-editorPct(editState.sel.start))+"%";
   }else sel.style.display="none";
+  scheduleSpectrum();
 }
 function updateAddRegionBtn(){
   const ok=editState&&editState.sel&&editState.sel.end-editState.sel.start>=0.02;
@@ -1013,6 +1092,7 @@ function renderEditorRegions(){
     row.querySelector("input").addEventListener("input",e=>{
       r.gain=(+e.target.value)/100;
       row.querySelector("output").textContent=e.target.value+"%";
+      scheduleSpectrum();
     });
     row.querySelector("button").addEventListener("click",()=>{
       editState.regions.splice(i,1);renderEditorRegions();updateEditorOverlays();
@@ -1022,8 +1102,9 @@ function renderEditorRegions(){
 }
 function applyEditor(reset){
   if(!editState)return;
-  const def=reset?{trimStart:0,trimEnd:0,gain:1,regions:[]}:{
+  const def=reset?{trimStart:0,trimEnd:0,gain:1,fadeIn:0,fadeOut:0,regions:[]}:{
     trimStart:editState.trimStart,trimEnd:editState.trimEnd,gain:editState.gain,
+    fadeIn:editState.fadeIn,fadeOut:editState.fadeOut,
     regions:editState.regions.map(r=>({start:r.start,end:r.end,gain:r.gain}))
   };
   const id=editState.id;
@@ -1039,6 +1120,19 @@ $("ewGain").addEventListener("input",e=>{
   if(!editState)return;
   editState.gain=(+e.target.value)/100;
   $("ewGainVal").textContent=e.target.value+"%";
+  scheduleSpectrum();
+});
+$("ewFadeIn").addEventListener("input",e=>{
+  if(!editState)return;
+  editState.fadeIn=Math.max(0,+e.target.value||0);
+  $("ewFadeInVal").textContent=editState.fadeIn.toFixed(2)+" с";
+  scheduleSpectrum();
+});
+$("ewFadeOut").addEventListener("input",e=>{
+  if(!editState)return;
+  editState.fadeOut=Math.max(0,+e.target.value||0);
+  $("ewFadeOutVal").textContent=editState.fadeOut.toFixed(2)+" с";
+  scheduleSpectrum();
 });
 $("ewStart").addEventListener("change",e=>{
   if(!editState)return;
@@ -1195,6 +1289,97 @@ function renderAi(){
   $("aiUnd").textContent=String(S.ai.underruns);
 }
 
+let captureSelected=new Set(),captureRefreshSent=false;
+const captureGainTimers={};
+function captureStateLabel(state){
+  return vdT({starting:"Запуск захвата",active:"Захват активен",silent:"Нет сигнала",stopping:"Остановка захвата",error:"Ошибка захвата"}[state]||state||"");
+}
+function renderCapture(){
+  const c=S.capture||{supported:false,reason:"",processes:[],sources:[]};
+  const list=$("captureProcessList"),active=$("captureActive"),add=$("captureAdd"),refresh=$("captureRefresh");
+  $("captureSupport").textContent=c.supported?"":vdT(c.reason||"Захват приложений недоступен в этой версии Windows.");
+  refresh.disabled=!c.supported;
+  if(c.supported&&tab==="capture"&&!(c.processes||[]).length&&!captureRefreshSent)
+    requestCaptureRefresh();
+  if(!c.supported){
+    list.innerHTML='<div class="dim" style="padding:10px">Захват приложений недоступен в этой версии Windows.</div>';
+    active.innerHTML='<div class="dim" style="padding:10px">Нет активных захватов</div>';
+    add.disabled=true;return;
+  }
+  const available=new Set((c.processes||[]).map(p=>p.pid));
+  for(const pid of [...captureSelected])if(!available.has(pid))captureSelected.delete(pid);
+  list.innerHTML="";
+  if(!(c.processes||[]).length){
+    list.innerHTML='<div class="dim" style="padding:10px">Нажми «Обновить список приложений».</div>';
+  }else{
+    for(const p of c.processes){
+      const row=document.createElement("label");row.className="capture-row";
+      row.innerHTML='<input type="checkbox" '+(captureSelected.has(p.pid)?"checked":"")+'>'+
+        '<div class="capture-info"><b>'+esc(p.name)+'</b><span>'+esc(p.title||("PID "+p.pid))+' · PID '+p.pid+'</span></div>'+
+        (p.audible?'<span class="capture-badge">'+vdT("звук")+'</span>':'');
+      const box=row.querySelector("input");
+      box.addEventListener("change",()=>{
+        if(box.checked)captureSelected.add(p.pid);else captureSelected.delete(p.pid);
+        add.disabled=captureSelected.size===0;
+      });
+      list.appendChild(row);
+    }
+  }
+  add.disabled=captureSelected.size===0;
+  const sources=c.sources||[];
+  active.innerHTML="";
+  if(!sources.length){
+    active.innerHTML='<div class="dim" style="padding:10px">Нет активных захватов</div>';
+    return;
+  }
+  for(const s of sources){
+    const row=document.createElement("div");row.className="capture-source";row.dataset.id=s.id;
+    const status=s.state==="error"?(s.error===1?"Процесс закрыт":"Ошибка захвата"):captureStateLabel(s.state);
+    row.innerHTML='<div class="capture-info"><b>'+esc(s.name||("PID "+s.pid))+'</b>'+
+      '<span>'+esc(s.title||("PID "+s.pid))+'</span></div>'+
+      '<input type="range" min="0" max="200" step="5" value="'+Math.round((s.gain??1)*100)+'">'+
+      '<output class="mono">'+Math.round((s.gain??1)*100)+'%</output>'+
+      '<span class="capture-state">'+esc(status)+'</span>'+
+      '<button class="s-ctl del" title="Удалить">✕</button>'+
+      '<div class="capture-level"><i></i></div>';
+    const slider=row.querySelector("input"),out=row.querySelector("output");
+    slider.addEventListener("input",e=>{
+      out.textContent=e.target.value+"%";
+      clearTimeout(captureGainTimers[s.id]);
+      captureGainTimers[s.id]=setTimeout(()=>send({cmd:"captureGain",id:s.id,value:(+e.target.value)/100}),35);
+    });
+    row.querySelector("button").addEventListener("click",()=>{
+      send({cmd:"captureRemove",id:s.id});
+      toast("Захват остановлен");
+    });
+    active.appendChild(row);
+    updateCaptureRow(s);
+  }
+}
+function updateCaptureRow(s){
+  const row=document.querySelector('.capture-source[data-id="'+s.id+'"]');if(!row)return;
+  const bar=row.querySelector(".capture-level i");
+  if(bar)bar.style.width=Math.min(100,Math.max(0,(+s.level||0)*100))+"%";
+  const label=row.querySelector(".capture-state");
+  if(label&&s.state)label.textContent=s.state==="error"?(s.error===1?"Процесс закрыт":"Ошибка захвата"):captureStateLabel(s.state);
+}
+function renderCaptureMeters(captures){
+  if(!Array.isArray(captures))return;
+  for(const s of captures)updateCaptureRow(s);
+}
+function requestCaptureRefresh(){
+  captureRefreshSent=true;send({cmd:"captureRefresh"});
+}
+$("captureRefresh").addEventListener("click",()=>{
+  captureSelected.clear();captureRefreshSent=false;requestCaptureRefresh();toast("Обновляю список приложений…");
+});
+$("captureAdd").addEventListener("click",()=>{
+  if(!captureSelected.size)return;
+  send({cmd:"captureAdd",pids:[...captureSelected]});
+  captureSelected.clear();
+  $("captureAdd").disabled=true;
+});
+
 function renderSettings(){
   const d=S.devices;
   const fill=(sel,items,cur)=>{if(sel===document.activeElement)return;sel.innerHTML="";
@@ -1250,6 +1435,7 @@ function renderMeters(m){
     +(m.dspOn?" · DSP "+Math.round(m.voiceLatency):" · DSP off")
     +(m.aiOn?" · AI "+Math.round(m.aiLatency):"");
   $("glitchInfo").textContent="ur "+m.micUnderruns;
+  renderCaptureMeters(m.captures);
 }
 
 // Nav
@@ -1258,6 +1444,8 @@ function selectPane(name){
   document.querySelectorAll(".nav-item").forEach(b=>b.classList.toggle("active",b.dataset.tab===name));
   document.querySelectorAll(".pane").forEach(p=>p.classList.toggle("active",p.id==="tab-"+name));
   $("paneTitle").textContent=TITLES[name]||"";
+  if(name==="capture"&&S&&S.capture?.supported&&!(S.capture.processes||[]).length&&!captureRefreshSent)
+    requestCaptureRefresh();
 }
 document.querySelectorAll(".nav-item").forEach(b=>b.addEventListener("click",()=>selectPane(b.dataset.tab)));
 
@@ -1552,6 +1740,11 @@ if(host){
       else {
         const lines=String(m.text||"").trim().split("\n").filter(s=>s.trim()&&!/^VD:exit/.test(s));
         toast("Ошибка конвертации: "+(lines.pop()||"неизвестная ошибка"));
+      }
+    }
+    else if(m.type==="soundSpectrum"){
+      if(editState&&editState.id===m.id&&!m.error){
+        editState.spectrum=m;drawEditorSpectrum();
       }
     }
     else if(m.type==="notice")toast(m.text);

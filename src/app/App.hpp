@@ -120,6 +120,8 @@ struct App {
     std::string renameSound(std::uint64_t id, const std::string& name);
     std::string previewSound(std::uint64_t id, std::size_t playbackIdx = SIZE_MAX);
     void stopPreview();
+    // Compact base spectrogram for the sound editor (source timeline).
+    nlohmann::json soundSpectrum(std::uint64_t id) const;
     // Scans data\sounds, adds new audio files and drops library entries whose
     // backing file in that folder has been deleted. Returns {added, removed}.
     std::pair<std::size_t, std::size_t> refreshSounds();

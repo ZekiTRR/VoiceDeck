@@ -52,6 +52,9 @@ struct Sound {
     double trimEnd = 0.0;   // seconds; 0 (or > source length) = end of source
     float editGain = 1.0f;  // baked-in global gain multiplier
     std::vector<SoundRegion> regions;
+    // Equal-power fades on the trimmed clip timeline. 0 disables a fade.
+    double fadeInSec = 0.0;
+    double fadeOutSec = 0.0;
     // Pristine decoded audio, captured lazily on the first edit. Empty until
     // then, so unedited clips use no extra memory.
     std::vector<float> sourcePcm;

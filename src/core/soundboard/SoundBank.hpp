@@ -67,7 +67,8 @@ public:
     // CLI thread only. Rebuilds the clip PCM from the pristine source. No
     // files are modified. Returns "" on success.
     std::string applyEdits(std::uint64_t id, double trimStart, double trimEnd, float gain,
-                           const std::vector<SoundRegion>& regions);
+                           const std::vector<SoundRegion>& regions, double fadeInSec,
+                           double fadeOutSec);
 
     // CLI thread only. Loads a library file; returns soundId -> hotkey combo
     // pairs (including a 0 -> combo entry for the global "stop all" hotkey).

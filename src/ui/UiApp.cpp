@@ -526,6 +526,11 @@ void UiApp::pushState() {
 
 void UiApp::pushMeters() {
     if (!web_ || metersPaused_) return;
+    // Closed/crashed capture processes are removed from the active list.
+    if (app_.engine.captureManager().reapFinished()) {
+        pushState();
+        return;
+    }
     const std::wstring w = utf8ToUtf16(app_.metersJson().dump());
     PWSTR json = static_cast<PWSTR>(CoTaskMemAlloc(sizeof(wchar_t) * (w.size() + 1)));
     if (!json) return;
@@ -1131,11 +1136,54 @@ void UiApp::handleMessage(const std::string& jsonText) {
     }
 
     // --- in-app audio editor ------------------------------------------------
+    if (cmd == "soundSpectrum") {
+        postJson(app_.soundSpectrum(j.at("id").get<std::uint64_t>()));
+        return;
+    }
     if (cmd == "editSound") {
         const std::string err = app_.editSound(j.at("id").get<std::uint64_t>(), j);
         if (!err.empty()) notify(err);
         else notify("Звук отредактирован");
         pushState();
+        return;
+    }
+
+    // --- application audio capture -----------------------------------------
+    if (cmd == "captureRefresh") {
+        app_.engine.captureManager().refreshProcesses();
+        pushState();
+        return;
+    }
+    if (cmd == "captureAdd") {
+        std::uint32_t added = 0;
+        std::string firstError;
+        if (j.contains("pids") && j.at("pids").is_array()) {
+            for (const auto& value : j.at("pids")) {
+                if (!value.is_number_unsigned() && !value.is_number_integer()) continue;
+                const auto pid = value.get<std::uint32_t>();
+                std::string err;
+                if (app_.engine.captureManager().add(pid, err)) {
+                    ++added;
+                } else if (firstError.empty()) {
+                    firstError = err;
+                }
+            }
+        }
+        if (added) notify("Захвачено приложений: " + std::to_string(added));
+        if (!firstError.empty()) notify(firstError);
+        pushState();
+        return;
+    }
+    if (cmd == "captureRemove") {
+        app_.engine.captureManager().remove(j.value("id", std::size_t(SIZE_MAX)));
+        pushState();
+        return;
+    }
+    if (cmd == "captureGain") {
+        const std::size_t id = j.value("id", std::size_t(SIZE_MAX));
+        const float gain = std::max(0.0f, std::min(2.0f, j.value("value", 1.0f)));
+        app_.engine.captureManager().setGain(id, gain);
+        pushMeters();
         return;
     }
 

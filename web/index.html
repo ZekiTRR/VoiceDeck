@@ -33,6 +33,9 @@
       <button class="nav-item" data-tab="ai">
         <svg viewBox="0 0 24 24"><rect x="5" y="7" width="14" height="10" rx="2"/><path d="M9 11v2M15 11v2M9.5 21h5"/></svg>
         <span>AI-голос</span></button>
+      <button class="nav-item" data-tab="capture">
+        <svg viewBox="0 0 24 24"><rect x="4" y="5" width="11" height="8" rx="2"/><path d="M7 17h5M9.5 13v4M18 8v8M15 11h6"/></svg>
+        <span>Захват</span></button>
       <button class="nav-item" data-tab="settings">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>
         <span>Устройства</span></button>
@@ -190,6 +193,24 @@
         </div>
       </section>
 
+      <!-- APPLICATION CAPTURE -->
+      <section id="tab-capture" class="pane">
+        <div class="pane-tools">
+          <button class="btn" id="captureRefresh">Обновить список приложений</button>
+          <span class="dim" id="captureSupport"></span>
+        </div>
+        <div class="panel">
+          <h3 class="panel-title">Приложения</h3>
+          <div class="note">Звук выбранного приложения будет добавлен в виртуальный кабель вместе с голосом и саундбордом. Список обновляется вручную.</div>
+          <div id="captureProcessList" class="capture-list"></div>
+          <button class="btn primary" id="captureAdd" disabled>Добавить выбранные</button>
+        </div>
+        <div class="panel">
+          <h3 class="panel-title">Активные захваты</h3>
+          <div id="captureActive" class="capture-active"></div>
+        </div>
+      </section>
+
       <!-- SETTINGS -->
       <section id="tab-settings" class="pane">
         <div class="settings-grid">
@@ -295,6 +316,7 @@
     <p class="dim" style="font-size:11px;margin:0 0 8px">
       Перетащи границы — обрезать. Выдели участок на волне — добавить изменения громкости.
     </p>
+    <canvas class="ew-spectrum" id="ewSpectrum" aria-label="Спектрограмма"></canvas>
     <div class="ew-wave" id="ewWave"></div>
     <div class="form-grid" style="margin-top:12px">
       <label>Начало, с<input type="number" id="ewStart" min="0" step="0.01" value="0"></label>
@@ -304,6 +326,16 @@
       <span>Общая громкость</span>
       <input type="range" id="ewGain" min="0" max="400" step="5" value="100">
       <output class="mono" id="ewGainVal">100%</output>
+    </div>
+    <div class="row">
+      <span>Fade-in</span>
+      <input type="range" id="ewFadeIn" min="0" max="10" step="0.01" value="0">
+      <output class="mono" id="ewFadeInVal">0.00 с</output>
+    </div>
+    <div class="row">
+      <span>Fade-out</span>
+      <input type="range" id="ewFadeOut" min="0" max="10" step="0.01" value="0">
+      <output class="mono" id="ewFadeOutVal">0.00 с</output>
     </div>
     <div class="editor-section">
       <span class="panel-title">Участки громкости</span>

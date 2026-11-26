@@ -102,6 +102,8 @@ bool Sound::loadFromFile(Sound& out, std::uint64_t id, const std::filesystem::pa
     out.trimEnd = 0.0;
     out.editGain = 1.0f;
     out.regions.clear();
+    out.fadeInSec = 0.0;
+    out.fadeOutSec = 0.0;
     out.sourcePcm.clear();
     return true;
 }
@@ -146,13 +148,30 @@ void Sound::applyEdits() {
     };
 
     const std::size_t nFrames = static_cast<std::size_t>(to - from);
+    const double outSeconds = double(nFrames) / double(sampleRate);
+    fadeInSec = std::max(0.0, std::min(fadeInSec, outSeconds));
+    fadeOutSec = std::max(0.0, std::min(fadeOutSec, outSeconds));
+    if (fadeInSec + fadeOutSec > outSeconds && fadeInSec + fadeOutSec > 0.0) {
+        const double scale = outSeconds / (fadeInSec + fadeOutSec);
+        fadeInSec *= scale;
+        fadeOutSec *= scale;
+    }
+    const double fadeOutStart = outSeconds - fadeOutSec;
+    constexpr double kHalfPi = 1.57079632679489661923;
+
     std::vector<float> out;
     out.resize(nFrames * ch);
     for (std::size_t i = 0; i < nFrames; ++i) {
         const std::size_t src = static_cast<std::size_t>(from + i) * ch;
         const double t = double(from + i) / double(sampleRate); // time on the source timeline
+        const double outT = double(i) / double(sampleRate);      // trimmed clip timeline
         float g = editGain;
         for (const SoundRegion& r : regions) g *= regionFactor(r, t);
+        // Equal-power fades: sin(t*pi/2) in, cos(t*pi/2) out.
+        if (fadeInSec > 0.0 && outT < fadeInSec)
+            g *= float(std::sin((outT / fadeInSec) * kHalfPi));
+        if (fadeOutSec > 0.0 && outT >= fadeOutStart)
+            g *= float(std::cos(((outT - fadeOutStart) / fadeOutSec) * kHalfPi));
         float* dst = out.data() + i * ch;
         for (std::size_t c = 0; c < ch; ++c) dst[c] = sourcePcm[src + c] * g;
     }

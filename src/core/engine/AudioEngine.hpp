@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/ai/AiVoiceStage.hpp"
+#include "core/capture/AppAudioCaptureManager.hpp"
 #include "core/dsp/AmbientPlayer.hpp"
 #include "core/dsp/VoiceProcessor.hpp"
 #include "core/engine/CommandQueue.hpp"
@@ -86,6 +87,8 @@ public:
     void stopMonitor();
     bool isRunning() const { return running_.load(std::memory_order_relaxed); }
     bool monitorRunning() const { return monRunning_; }
+    AppAudioCaptureManager& captureManager() { return captureManager_; }
+    const AppAudioCaptureManager& captureManager() const { return captureManager_; }
 
     // Control-thread API. The recursive mutex serialises hotkey/UI/CLI
     // producers; mutation paths hold lockControl() across drain + snapshot swap.
@@ -259,6 +262,7 @@ private:
     DriftPath micPath_{kMaxBlockFrames, kMicTargetFillFrames};
     DriftPath monPath_{kMaxBlockFrames, kMonitorTargetFillFrames};
     VoiceMixer mixer_;
+    AppAudioCaptureManager captureManager_;
 
     std::atomic<bool> running_{false};
     std::atomic<bool> monitorActive_{false};

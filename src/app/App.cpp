@@ -3,6 +3,7 @@
 #include "core/platform/AutoStart.hpp"
 #include "core/platform/Console.hpp"
 #include "core/platform/Elevation.hpp"
+#include "core/soundboard/SoundSpectrum.hpp"
 #include "core/util/Log.hpp"
 
 #include <algorithm>
@@ -538,6 +539,8 @@ std::string App::editSound(std::uint64_t id, const nlohmann::json& def) {
     double trimStart = std::max(0.0, getNum("trimStart", 0.0));
     double trimEnd = getNum("trimEnd", 0.0); // 0 = full length
     const float gain = float(std::max(0.0, std::min(4.0, getNum("gain", 1.0))));
+    const double fadeInSec = std::max(0.0, getNum("fadeIn", 0.0));
+    const double fadeOutSec = std::max(0.0, getNum("fadeOut", 0.0));
 
     std::vector<SoundRegion> regions;
     if (def.contains("regions") && def.at("regions").is_array()) {
@@ -553,7 +556,8 @@ std::string App::editSound(std::uint64_t id, const nlohmann::json& def) {
                   [](const SoundRegion& a, const SoundRegion& b) { return a.startSec < b.startSec; });
     }
 
-    const std::string err = bank.applyEdits(id, trimStart, trimEnd, gain, regions);
+    const std::string err =
+        bank.applyEdits(id, trimStart, trimEnd, gain, regions, fadeInSec, fadeOutSec);
     if (!err.empty()) return err;
     bank.saveToJson(soundsFile, hotkeys.allSoundCombos());
     return "";
@@ -1237,6 +1241,25 @@ void App::stopPreview() {
     reconcileMonitor();
 }
 
+nlohmann::json App::soundSpectrum(std::uint64_t id) const {
+    nlohmann::json j{
+        {"type", "soundSpectrum"}, {"id", id}, {"cols", 0}, {"bins", 0}, {"dbMin", -80}};
+    const Sound* s = bank.find(id);
+    if (!s) {
+        j["error"] = "no sound";
+        return j;
+    }
+    const std::vector<float>& pcm = s->sourcePcm.empty() ? s->pcm : s->sourcePcm;
+    const SoundSpectrum spectrum =
+        computeSoundSpectrum(pcm.data(), s->sourcePcm.empty() ? s->frames : pcm.size() / s->channels,
+                             s->channels, s->sampleRate, 192, 32);
+    j["cols"] = spectrum.cols;
+    j["bins"] = spectrum.bins;
+    j["dbMin"] = spectrum.dbMin;
+    j["data"] = spectrum.data;
+    return j;
+}
+
 std::pair<std::size_t, std::size_t> App::refreshSounds() {
     std::size_t added = 0, removed = 0;
     const std::filesystem::path dir = dataDir / "sounds";
@@ -1490,6 +1513,7 @@ nlohmann::json App::metersJson() const {
                            {"pos", v.totalFrames ? double(v.posFrames) / double(v.totalFrames) : 0.0},
                            {"paused", v.paused}});
     j["playing"] = std::move(playing);
+    j["captures"] = engine.captureManager().metersJson();
     return j;
 }
 
@@ -1596,6 +1620,8 @@ nlohmann::json App::statusJson() const {
         e["edits"] = {{"trimStart", s->trimStart},
                       {"trimEnd", s->trimEnd},
                       {"gain", double(s->editGain)},
+                      {"fadeIn", s->fadeInSec},
+                      {"fadeOut", s->fadeOutSec},
                       {"regions", std::move(regions)}};
 
         // Waveform peaks: 256 buckets of max amplitude, normalized to 0..1.
@@ -1705,6 +1731,11 @@ nlohmann::json App::statusJson() const {
     j["hotkeys"] = {{"voice", hotkeys.voiceToggleCombo()},
                     {"ai", hotkeys.aiToggleCombo()},
                     {"stopAll", hotkeys.stopAllCombo()}};
+    const auto& capture = engine.captureManager();
+    j["capture"] = {{"supported", capture.supported()},
+                    {"reason", capture.unsupportedReason()},
+                    {"processes", capture.processesJson()},
+                    {"sources", capture.sourcesJson()}};
     nlohmann::json allTags = nlohmann::json::array();
     for (const std::string& t : bank.allTags()) allTags.push_back(t);
     j["allTags"] = std::move(allTags);

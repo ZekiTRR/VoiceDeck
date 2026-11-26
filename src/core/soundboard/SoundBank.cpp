@@ -99,13 +99,16 @@ std::vector<std::string> SoundBank::allTags() const {
 }
 
 std::string SoundBank::applyEdits(std::uint64_t id, double trimStart, double trimEnd, float gain,
-                                  const std::vector<SoundRegion>& regions) {
+                                  const std::vector<SoundRegion>& regions, double fadeInSec,
+                                  double fadeOutSec) {
     Sound* s = find(id);
     if (!s) return "no sound with id " + std::to_string(id);
     s->trimStart = trimStart;
     s->trimEnd = trimEnd;
     s->editGain = std::max(0.0f, std::min(4.0f, gain));
     s->regions = regions;
+    s->fadeInSec = std::max(0.0, fadeInSec);
+    s->fadeOutSec = std::max(0.0, fadeOutSec);
     s->applyEdits();
     return "";
 }
@@ -277,6 +280,8 @@ std::map<std::uint64_t, std::string> SoundBank::loadFromJson(const std::filesyst
             const double trimStart = e.value("trimStart", 0.0);
             const double trimEnd = e.value("trimEnd", 0.0);
             const float editGain = float(e.value("editGain", 1.0));
+            const double fadeInSec = std::max(0.0, e.value("fadeIn", 0.0));
+            const double fadeOutSec = std::max(0.0, e.value("fadeOut", 0.0));
             std::vector<SoundRegion> regions;
             if (e.contains("regions") && e.at("regions").is_array()) {
                 for (const auto& r : e.at("regions")) {
@@ -290,11 +295,14 @@ std::map<std::uint64_t, std::string> SoundBank::loadFromJson(const std::filesyst
             }
             std::sort(regions.begin(), regions.end(),
                       [](const SoundRegion& a, const SoundRegion& b) { return a.startSec < b.startSec; });
-            if (trimStart != 0.0 || trimEnd != 0.0 || editGain != 1.0f || !regions.empty()) {
+            if (trimStart != 0.0 || trimEnd != 0.0 || editGain != 1.0f || !regions.empty() ||
+                fadeInSec > 0.0 || fadeOutSec > 0.0) {
                 s->trimStart = trimStart;
                 s->trimEnd = trimEnd;
                 s->editGain = editGain;
                 s->regions = std::move(regions);
+                s->fadeInSec = fadeInSec;
+                s->fadeOutSec = fadeOutSec;
                 s->applyEdits();
             }
         }
@@ -331,6 +339,8 @@ bool SoundBank::saveToJson(const std::filesystem::path& file,
         e["trimStart"] = s->trimStart;
         e["trimEnd"] = s->trimEnd;
         e["editGain"] = double(s->editGain);
+        e["fadeIn"] = s->fadeInSec;
+        e["fadeOut"] = s->fadeOutSec;
         nlohmann::json regions = nlohmann::json::array();
         for (const SoundRegion& r : s->regions)
             regions.push_back({{"start", r.startSec}, {"end", r.endSec}, {"gain", double(r.gain)}});

@@ -38,6 +38,8 @@ add_executable(voicedeck WIN32
     src/app/App.cpp
     src/ui/UiApp.cpp
     src/core/engine/AudioEngine.cpp
+    src/core/capture/ProcessAudioCapture.cpp
+    src/core/capture/AppAudioCaptureManager.cpp
     src/core/dsp/VoiceProcessor.cpp
     src/core/dsp/AmbientPlayer.cpp
     src/core/ai/Ort.cpp
@@ -47,6 +49,7 @@ add_executable(voicedeck WIN32
     src/core/ai/AiVoiceStage.cpp
     src/core/soundboard/Sound.cpp
     src/core/soundboard/SoundBank.cpp
+    src/core/soundboard/SoundSpectrum.cpp
     src/core/soundboard/VoiceMixer.cpp
     src/core/settings/Settings.cpp
     src/core/platform/HotkeyManager.cpp
@@ -70,6 +73,8 @@ target_compile_definitions(voicedeck PRIVATE
     WIN32_LEAN_AND_MEAN
     NOMINMAX
     _CRT_SECURE_NO_WARNINGS
+    _WIN32_WINNT=0x0A00
+    NTDDI_VERSION=0x0A00000A
 )
 
 if(MSVC)
@@ -88,7 +93,7 @@ else()
 endif()
 
 # WASAPI/COM (ole32), hotkeys/tray (user32, shell32), WebView2 UI (static loader)
-target_link_libraries(voicedeck PRIVATE user32 shell32 ole32 daisysp iir1
+target_link_libraries(voicedeck PRIVATE user32 shell32 ole32 Mmdevapi avrt daisysp iir1
     "${CMAKE_SOURCE_DIR}/third_party/webview2/lib/x64/WebView2LoaderStatic.lib")
 
 # onnxruntime.dll is loaded dynamically (OrtGetApiBase); ship it next to the exe.
