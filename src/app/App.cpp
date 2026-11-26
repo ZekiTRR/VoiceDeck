@@ -1,6 +1,7 @@
 #include "app/App.hpp"
 
 #include "core/platform/AutoStart.hpp"
+#include "core/platform/Console.hpp"
 #include "core/platform/Elevation.hpp"
 #include "core/util/Log.hpp"
 
@@ -450,6 +451,13 @@ void App::setLanguage(const std::string& language) {
     if (language != "ru" && language != "en") return;
     settings.language = language;
     settings.save(settingsFile);
+}
+
+void App::setHideConsole(bool on) {
+    settings.hideConsole = on;
+    settings.save(settingsFile);
+    if (on) console::hide();
+    else console::ensureConsole();
 }
 
 // ---------------------------------------------------------------- tags
@@ -1702,6 +1710,7 @@ nlohmann::json App::statusJson() const {
     j["allTags"] = std::move(allTags);
     j["autoStart"] = isAutoStartEnabled();
     j["runAsAdmin"] = settings.runAsAdmin;
+    j["hideConsole"] = settings.hideConsole;
     j["elevated"] = isElevated();
     return j;
 }

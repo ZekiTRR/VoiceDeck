@@ -41,6 +41,9 @@ struct Settings {
     // Windows integration. `runAsAdmin` relaunches the app through UAC on
     // startup; `autoStart` lives in HKCU\...\Run (see AutoStart.hpp).
     bool runAsAdmin = false;
+    // Normal GUI launches create no visible console by default. CLI mode is
+    // unaffected and always opens/attaches one.
+    bool hideConsole = true;
 
     // Extra global hotkeys.
     std::string voiceHotkey; // toggles the DSP chain

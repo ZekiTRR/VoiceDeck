@@ -47,6 +47,7 @@ bool Settings::load(const std::filesystem::path& file) {
         vadThresholdDb = std::max(-60.0f, std::min(-20.0f, vadThresholdDb));
         latencyMode = j.value("latencyMode", 0);
         runAsAdmin = j.value("runAsAdmin", false);
+        hideConsole = j.value("hideConsole", true);
         voiceHotkey = j.value("voiceHotkey", "");
         aiHotkey = j.value("aiHotkey", "");
     } catch (...) {
@@ -74,6 +75,7 @@ bool Settings::save(const std::filesystem::path& file) const {
     j["vadThresholdDb"] = vadThresholdDb;
     j["latencyMode"] = latencyMode;
     j["runAsAdmin"] = runAsAdmin;
+    j["hideConsole"] = hideConsole;
     j["voiceHotkey"] = voiceHotkey;
     j["aiHotkey"] = aiHotkey;
 

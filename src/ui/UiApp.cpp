@@ -1147,6 +1147,11 @@ void UiApp::handleMessage(const std::string& jsonText) {
         pushState();
         return;
     }
+    if (cmd == "hideConsole") {
+        app_.setHideConsole(j.value("on", true));
+        pushState();
+        return;
+    }
     if (cmd == "runAsAdmin") {
         bool relaunching = false;
         const std::string err = app_.setRunAsAdmin(j.value("on", false), relaunching);

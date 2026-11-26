@@ -316,7 +316,7 @@ function demoState(){
       rawPeaks:pk,sourceDur:1.2,tags:["мелочи"],edits:{trimStart:0,trimEnd:0,gain:1,regions:[]}},
       {id:3,name:"gong",dur:4.0,gain:1,loop:false,hotkey:"",eq:[0,0,0,0,0],peaks:pk,
       rawPeaks:pk,sourceDur:4.0,tags:[],edits:{trimStart:0,trimEnd:0,gain:1,regions:[]}}],
-    allTags:["hotkey","мелочи","сигнал"],autoStart:false,runAsAdmin:false,elevated:false,
+    allTags:["hotkey","мелочи","сигнал"],autoStart:false,runAsAdmin:false,hideConsole:true,elevated:false,
     ai:{enabled:true,ready:true,voice:"Narrator (male)",device:"GTX 1080",usesGpu:true,provider:"dml",
       modelsInstalled:true,latency:290,underruns:0,pitch:0,margin:150,fade:30,autolimit:true,flapLimit:8,
       voices:[{name:"Narrator (male)",gender:"male",pitch:0},{name:"Presenter (female)",gender:"female",pitch:12}]},
@@ -1208,6 +1208,7 @@ function renderSettings(){
   if(S.latencyMode!==undefined)$("latencyMode").value=String(S.latencyMode);
   if(document.activeElement!==$("autoStartChk"))$("autoStartChk").checked=!!S.autoStart;
   if(document.activeElement!==$("runAdminChk"))$("runAdminChk").checked=!!S.runAsAdmin;
+  if(document.activeElement!==$("hideConsoleChk"))$("hideConsoleChk").checked=!!S.hideConsole;
   $("runNote").textContent=S.elevated
     ? "Приложение сейчас запущено от имени администратора."
     : "При включении «от имени админа» приложение перезапустится с запросом UAC. Настройка действует при каждом запуске.";
@@ -1390,6 +1391,7 @@ $("bypassChk").addEventListener("change",e=>send({cmd:"bypassOn",on:e.target.che
 $("duckingChk").addEventListener("change",e=>send({cmd:"duckingOn",on:e.target.checked}));
 $("autoStartChk").addEventListener("change",e=>send({cmd:"autoStart",on:e.target.checked}));
 $("runAdminChk").addEventListener("change",e=>send({cmd:"runAsAdmin",on:e.target.checked}));
+$("hideConsoleChk").addEventListener("change",e=>send({cmd:"hideConsole",on:e.target.checked}));
 $("hkVoice").addEventListener("click",()=>startHkCapture({target:"voice"}));
 $("hkAi").addEventListener("click",()=>startHkCapture({target:"ai"}));
 $("hkStopAll").addEventListener("click",()=>startHkCapture({target:"stopall"}));

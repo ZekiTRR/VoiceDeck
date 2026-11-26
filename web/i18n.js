@@ -235,6 +235,8 @@ const VD_I18N = {
     "Запуск": "Startup",
     "Автозапуск с Windows": "Launch with Windows",
     "Всегда от имени админа": "Always run as administrator",
+    "Скрывать консоль при запуске": "Hide console on startup",
+    "Консоль скрыта при обычном запуске. Режим `--cli` всегда показывает вывод.": "The console is hidden for normal launches. `--cli` mode always keeps its output.",
     "При включении «от имени админа» приложение перезапустится с запросом UAC. Настройка действует при каждом запуске.": "When enabled, the app restarts with a UAC prompt. The setting is applied on every launch.",
     "Приложение сейчас запущено от имени администратора.": "The app is currently running as administrator.",
     "не запущено": "not running",

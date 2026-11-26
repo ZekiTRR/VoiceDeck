@@ -2,6 +2,7 @@
 // pass --cli for the headless console mode.
 
 #include "app/App.hpp"
+#include "core/platform/Console.hpp"
 #include "core/util/Log.hpp"
 #include "ui/UiApp.hpp"
 
@@ -888,14 +889,17 @@ int runCli(App& app) {
 } // namespace
 
 int main(int argc, char** argv) {
-    SetConsoleOutputCP(CP_UTF8);
-    {
-        const HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
-        DWORD mode = 0;
-        if (GetConsoleMode(h, &mode)) SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-    }
-
     const bool cliMode = (argc > 1 && std::strcmp(argv[1], "--cli") == 0);
+
+    // Read this one preference before any logging. The executable uses the
+    // Windows GUI subsystem, so no console is created at process startup; CLI
+    // mode (or an explicit opt-out) attaches/allocates one on demand.
+    vd::Settings bootSettings;
+    bootSettings.load(vd::Settings::appDataDir() / "settings.json");
+    const bool hideConsole = bootSettings.hideConsole;
+    if (cliMode || !hideConsole) vd::console::ensureConsole();
+    else vd::console::hide();
+
     vd::log::info("VoiceDeck 1.7.0 - Soundpad + Voicemod (DSP + AI), C++20");
 
     // The engine owns several independent, fixed-size DSP chains. Keep the
@@ -919,8 +923,6 @@ int main(int argc, char** argv) {
     if (cliMode) {
         code = runCli(app);
     } else {
-        // UI mode: hide the console; the window takes over.
-        ShowWindow(GetConsoleWindow(), SW_HIDE);
         code = vd::runUi(app);
     }
 

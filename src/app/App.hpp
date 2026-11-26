@@ -52,6 +52,7 @@ struct App {
     // Voice-activity gate threshold (-60..-20 dBFS); persists to settings.
     std::string setVadThresholdDb(float db);
     void setLanguage(const std::string& language);
+    void setHideConsole(bool on);
     // Global VAD-gated ambience master and soundboard FX Send.
     std::string setAmbientEnabled(bool on);
     std::string setSoundFxSend(bool on);

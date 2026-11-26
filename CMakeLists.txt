@@ -32,7 +32,7 @@ target_include_directories(iir1 PUBLIC third_party/iir1)
 
 # ------------------------------------------------------------------------
 
-add_executable(voicedeck
+add_executable(voicedeck WIN32
     src/app/main.cpp
     src/app/voicedeck.rc
     src/app/App.cpp
@@ -50,6 +50,7 @@ add_executable(voicedeck
     src/core/soundboard/VoiceMixer.cpp
     src/core/settings/Settings.cpp
     src/core/platform/HotkeyManager.cpp
+    src/core/platform/Console.cpp
     src/core/platform/AutoStart.cpp
     src/core/platform/Elevation.cpp
     src/core/platform/ThreadAffinity.cpp
@@ -72,6 +73,9 @@ target_compile_definitions(voicedeck PRIVATE
 )
 
 if(MSVC)
+    # main() is the real entry point in both GUI and CLI modes; the GUI
+    # subsystem prevents Windows from creating a console before startup.
+    target_link_options(voicedeck PRIVATE /ENTRY:mainCRTStartup)
     target_compile_options(voicedeck PRIVATE /W3 /permissive-)
     # Real-time DSP: fast FP math; /MP for quick parallel builds.
     # (Whole-program /GL+/LTCG was tried and dropped: 3x slower rebuilds for
