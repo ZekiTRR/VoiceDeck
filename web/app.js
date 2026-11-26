@@ -1289,7 +1289,7 @@ function renderAi(){
   $("aiUnd").textContent=String(S.ai.underruns);
 }
 
-let captureSelected=new Set(),captureRefreshSent=false;
+let captureSelected=new Set(),captureRefreshSent=false,captureQuery="";
 const captureGainTimers={};
 function captureStateLabel(state){
   return vdT({starting:"Запуск захвата",active:"Захват активен",silent:"Нет сигнала",stopping:"Остановка захвата",error:"Ошибка захвата"}[state]||state||"");
@@ -1299,20 +1299,31 @@ function renderCapture(){
   const list=$("captureProcessList"),active=$("captureActive"),add=$("captureAdd"),refresh=$("captureRefresh");
   $("captureSupport").textContent=c.supported?"":vdT(c.reason||"Захват приложений недоступен в этой версии Windows.");
   refresh.disabled=!c.supported;
+  const count=$("captureCount");
   if(c.supported&&tab==="capture"&&!(c.processes||[]).length&&!captureRefreshSent)
     requestCaptureRefresh();
   if(!c.supported){
-    list.innerHTML='<div class="dim" style="padding:10px">Захват приложений недоступен в этой версии Windows.</div>';
-    active.innerHTML='<div class="dim" style="padding:10px">Нет активных захватов</div>';
+    count.textContent="";
+    list.innerHTML='<div class="dim" style="padding:10px">'+vdT("Захват приложений недоступен в этой версии Windows.")+'</div>';
+    active.innerHTML='<div class="dim" style="padding:10px">'+vdT("Нет активных захватов")+'</div>';
     add.disabled=true;return;
   }
-  const available=new Set((c.processes||[]).map(p=>p.pid));
+  const all=c.processes||[];
+  const available=new Set(all.map(p=>p.pid));
   for(const pid of [...captureSelected])if(!available.has(pid))captureSelected.delete(pid);
+  const query=captureQuery.trim().toLowerCase();
+  const filtered=query?all.filter(p=>
+    (p.name||"").toLowerCase().includes(query)||
+    (p.title||"").toLowerCase().includes(query)||
+    String(p.pid).includes(query)):all;
+  count.textContent=all.length?(filtered.length+" / "+all.length+(captureSelected.size?" · "+captureSelected.size+" ✓":"")):"";
   list.innerHTML="";
-  if(!(c.processes||[]).length){
-    list.innerHTML='<div class="dim" style="padding:10px">Нажми «Обновить список приложений».</div>';
+  if(!all.length){
+    list.innerHTML='<div class="dim" style="padding:10px">'+vdT("Нажми «Обновить список приложений».")+'</div>';
+  }else if(!filtered.length){
+    list.innerHTML='<div class="dim" style="padding:10px">'+vdT("Ничего не найдено")+'</div>';
   }else{
-    for(const p of c.processes){
+    for(const p of filtered){
       const row=document.createElement("label");row.className="capture-row";
       row.innerHTML='<input type="checkbox" '+(captureSelected.has(p.pid)?"checked":"")+'>'+
         '<div class="capture-info"><b>'+esc(p.name)+'</b><span>'+esc(p.title||("PID "+p.pid))+' · PID '+p.pid+'</span></div>'+
@@ -1321,6 +1332,7 @@ function renderCapture(){
       box.addEventListener("change",()=>{
         if(box.checked)captureSelected.add(p.pid);else captureSelected.delete(p.pid);
         add.disabled=captureSelected.size===0;
+        count.textContent=all.length?(filtered.length+" / "+all.length+(captureSelected.size?" · "+captureSelected.size+" ✓":"")):"";
       });
       list.appendChild(row);
     }
@@ -1329,7 +1341,7 @@ function renderCapture(){
   const sources=c.sources||[];
   active.innerHTML="";
   if(!sources.length){
-    active.innerHTML='<div class="dim" style="padding:10px">Нет активных захватов</div>';
+    active.innerHTML='<div class="dim" style="padding:10px">'+vdT("Нет активных захватов")+'</div>';
     return;
   }
   for(const s of sources){
@@ -1372,6 +1384,16 @@ function requestCaptureRefresh(){
 }
 $("captureRefresh").addEventListener("click",()=>{
   captureSelected.clear();captureRefreshSent=false;requestCaptureRefresh();toast("Обновляю список приложений…");
+});
+$("captureSearch").addEventListener("input",e=>{
+  captureQuery=e.target.value||"";
+  renderCapture();
+});
+$("captureSearch").addEventListener("keydown",e=>{
+  if(e.key==="Escape"&&e.target.value){
+    e.stopPropagation();
+    e.target.value="";captureQuery="";renderCapture();
+  }
 });
 $("captureAdd").addEventListener("click",()=>{
   if(!captureSelected.size)return;

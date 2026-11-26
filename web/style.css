@@ -1101,6 +1101,8 @@ input[type="range"]::-webkit-slider-thumb {
 
 /* ============ application capture ============ */
 .capture-list { display: flex; flex-direction: column; gap: 5px; margin: 10px 0; max-height: 310px; overflow-y: auto; }
+#captureSearch { width: 210px; }
+#captureSearch::-webkit-search-cancel-button { cursor: pointer; }
 .capture-row {
   display: flex; align-items: center; gap: 9px; padding: 7px 9px;
   background: var(--bg2); border: 1px solid var(--line); border-radius: 5px;
