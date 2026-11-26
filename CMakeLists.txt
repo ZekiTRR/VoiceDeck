@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(VoiceDeck VERSION 1.7.0 LANGUAGES C CXX)
+project(VoiceDeck VERSION 2.0.0 LANGUAGES C CXX)
 
 message(STATUS "VoiceDeck - Soundpad + VoiceLab + RVC (Windows only)")
 

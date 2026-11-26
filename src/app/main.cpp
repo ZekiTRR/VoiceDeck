@@ -900,7 +900,7 @@ int main(int argc, char** argv) {
     if (cliMode || !hideConsole) vd::console::ensureConsole();
     else vd::console::hide();
 
-    vd::log::info("VoiceDeck 1.7.0 - Soundpad + Voicemod (DSP + AI), C++20");
+    vd::log::info("VoiceDeck 2.0.0 - Soundpad + Voicemod (DSP + AI), C++20");
 
     // The engine owns several independent, fixed-size DSP chains. Keep the
     // facade off the default 1 MB thread stack (CLI and UI both enter here).

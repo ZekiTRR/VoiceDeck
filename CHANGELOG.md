@@ -1,3 +1,37 @@
+# VoiceDeck 2.0.0
+
+## Highlights
+
+- **Application audio capture**: add up to eight applications to the virtual cable alongside your voice and soundboard. Capture uses WASAPI Process Loopback, follows the target process tree, lists active audio sessions across all render endpoints plus visible windows, and includes search by process name, window title or PID.
+- **Per-source controls**: independent volume with smoothing and click-free fades, live activity meters, process status, safe removal, and automatic cleanup when a captured process closes.
+- **Sound editor upgrades**: equal-power fade-in, fade-out or both, persisted as non-destructive edit metadata, plus a live 192×32 spectrogram that follows trim, gain, regions and fades.
+- **Cleaner startup**: normal GUI launches no longer create a console window. The new “Hide console on startup” option is persisted, while `--cli` mode always keeps console input/output available for automation.
+- **Output safety**: captured audio is mixed into the virtual cable after the local monitor copy, so it is never monitored twice, and a transparent threshold soft limiter leaves levels below 0.85 untouched.
+
+## Compatibility
+
+- Existing `data\settings.json`, `characters.json`, sound libraries and RVC models continue to work.
+- Process capture requires Windows 10 build 20348+ or Windows 11. Protected or elevated applications may require running VoiceDeck as administrator.
+
+---
+
+# VoiceDeck 2.0.0 — Русский
+
+## Главное
+
+- **Захват звука приложений**: до восьми приложений можно добавить в виртуальный кабель вместе с голосом и саундбордом. Используется WASAPI Process Loopback с обходом дерева процессов, списком активных аудиосессий со всех render-устройств и видимых окон, а также поиском по имени процесса, заголовку окна или PID.
+- **Управление источниками**: отдельная громкость с плавным сглаживанием и фейдами без щелчков, индикаторы активности, статус процесса, безопасное удаление и автоматическая очистка при закрытии захваченного приложения.
+- **Обновлённый редактор звука**: equal-power fade-in, fade-out или оба сразу с сохранением в неразрушающих метаданных, а также динамическая спектрограмма 192×32, которая следует за обрезкой, громкостью, участками и фейдами.
+- **Чистый запуск**: обычный GUI-запуск больше не создаёт окно консоли. Новая опция «Скрывать консоль при запуске» сохраняется, а режим `--cli` всегда оставляет ввод/вывод консоли для автоматизации.
+- **Защита выхода**: захваченный звук добавляется в виртуальный кабель после копии для локального монитора, поэтому не дублируется, а прозрачный threshold soft limiter не трогает уровни ниже 0.85.
+
+## Совместимость
+
+- Существующие `data\settings.json`, `characters.json`, библиотеки звуков и RVC-модели продолжают работать.
+- Для захвата процессов нужны Windows 10 build 20348+ или Windows 11. Для защищённых приложений и приложений, запущенных от администратора, может потребоваться запуск VoiceDeck от имени администратора.
+
+---
+
 # VoiceDeck 1.7.0
 
 ## Highlights
